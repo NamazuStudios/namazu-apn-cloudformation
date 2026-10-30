@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   Namazu co-selling agent access (strict-accountability variant): one
-  ACE-Opportunity-Manager-<user> IAM role PER NAMED USER in this account,
+  Namazu-CoSell-Opportunity-Manager-<user> IAM role PER NAMED USER in this account,
   each individually trusted, individually tagged, and separately
   reviewable/revocable. Use this instead of opportunity-manager-role.yaml
   when multiple people work co-selling in this account and you want each
@@ -26,10 +26,11 @@ Parameters:
     Type: CommaDelimitedList
     Description: >
       The individuals to create roles for (e.g. "peter,maria"). Each name
-      becomes its own role (ACE-Opportunity-Manager-<name>), its
+      becomes its own role (Namazu-CoSell-Opportunity-Manager-<name>), its
       AuthorizedUser tag, and the sts:SourceIdentity the agent must
-      present for that role. IAM role-name rules apply: letters, digits,
-      and _+=,.@- only.
+      present for that role. IAM role names cap at 64 characters and the
+      prefix takes 35, so keep user names to 29 characters or fewer;
+      letters, digits, and _+=,.@- only.
   ExternalId:
     Type: String
     Default: ''
@@ -78,10 +79,10 @@ Resources:
   Fn::ForEach::PerUserRole:
     - User
     - !Ref Users
-    - 'ACEOpportunityManagerRole${User}':
+    - 'NamazuCoSellOpportunityManagerRole${User}':
         Type: AWS::IAM::Role
         Properties:
-          RoleName: !Sub 'ACE-Opportunity-Manager-${User}'
+          RoleName: !Sub 'Namazu-CoSell-Opportunity-Manager-${User}'
           Description: !Sub >
             Assumed cross-account by the Namazu co-selling agent
             (source identity ${User}) to manage Partner Central
@@ -170,7 +171,7 @@ Outputs:
           it to your Namazu contact (along with the ExternalId, if you
           set one) — it becomes that user's deployment role, with
           ${User} as the source identity.
-        Value: !Sub 'arn:aws:iam::${AWS::AccountId}:role/ACE-Opportunity-Manager-${User}'
+        Value: !Sub 'arn:aws:iam::${AWS::AccountId}:role/Namazu-CoSell-Opportunity-Manager-${User}'
   TemplateVersion:
     Description: Template revision for support reference.
     Value: '1.0.0'

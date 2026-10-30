@@ -42,7 +42,7 @@ no permissions that could reach it.
 
 ### `templates/opportunity-manager-role.yaml` — default model
 
-One shared `ACE-Opportunity-Manager` role, attributed to one named user
+One shared `Namazu-CoSell-Opportunity-Manager` role, attributed to one named user
 via the `AuthorizedUser` tag + source-identity match. Use this when one
 person (e.g. your account manager) is the co-selling contact.
 
@@ -57,7 +57,7 @@ person (e.g. your account manager) is the co-selling contact.
 
 ### `templates/per-user-roles.yaml` — strict-accountability variant
 
-One `ACE-Opportunity-Manager-<user>` role **per named user** from the
+One `Namazu-CoSell-Opportunity-Manager-<user>` role **per named user** from the
 `Users` list (a comma-delimited list, e.g. `"peter,maria"`). Same trust
 and permission shape as above, per person — use this when several people
 work co-selling and you want each one's access to be an independent,

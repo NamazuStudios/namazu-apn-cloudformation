@@ -9,7 +9,7 @@
         "sts:SetSourceIdentity"
       ],
       "Resource": [
-        "arn:aws:iam::123456789012:role/ACE-Opportunity-Manager-Peter"
+        "arn:aws:iam::123456789012:role/Namazu-CoSell-Opportunity-Manager-Peter"
       ],
       "Condition": {
         "StringEquals": {

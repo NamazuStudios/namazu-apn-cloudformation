@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   Namazu co-selling agent access (default model): one shared
-  ACE-Opportunity-Manager IAM role in this account that the Namazu
+  Namazu-CoSell-Opportunity-Manager IAM role in this account that the Namazu
   co-selling agent assumes cross-account. Accountability is enforced per
   user: the role carries an AuthorizedUser tag, and the trust policy only
   accepts sessions presenting that exact sts:SourceIdentity — so every
@@ -73,7 +73,7 @@ Resources:
   OpportunityManagerRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: ACE-Opportunity-Manager
+      RoleName: Namazu-CoSell-Opportunity-Manager
       Description: >
         Assumed cross-account by the Namazu co-selling agent (with the
         AuthorizedUser source identity) to manage Partner Central
