@@ -26,17 +26,20 @@ Parameters:
       manager). Two things must match this value: the sts:SourceIdentity
       the agent presents when assuming the role, and this role's
       AuthorizedUser tag (set automatically below). Every action lands in
-      CloudTrail under this identity.
-    AllowedPattern: '^[\w+=,.@-]{1,64}$'
+      CloudTrail under this identity. 2-64 characters (AWS requires
+      source identities to be at least 2), letters, digits, and
+      _+=,.@- only.
+    AllowedPattern: '^[A-Za-z0-9_+=,.@-]{2,64}$'
   ExternalId:
     Type: String
     Default: ''
     Description: >
       Optional external ID for additional confused-deputy protection. When
       set, the trust policy additionally requires sts:ExternalId to match
-      and the agent must be configured with the same value. Leave empty to
-      rely on the SourceIdentity enforcement alone.
-    AllowedPattern: '^[A-Za-z0-9_=/+-]{0,1224}$'
+      and the agent must be configured with the same value. At least 2
+      characters when set (AWS requirement). Leave empty to rely on the
+      SourceIdentity enforcement alone.
+    AllowedPattern: '^$|^[A-Za-z0-9_+=,.@-]{2,1224}$'
   EnforceSessionName:
     Type: String
     Default: 'false'

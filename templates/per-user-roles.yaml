@@ -28,9 +28,11 @@ Parameters:
       The individuals to create roles for (e.g. "peter,maria"). Each name
       becomes its own role (Namazu-CoSell-Opportunity-Manager-<name>), its
       AuthorizedUser tag, and the sts:SourceIdentity the agent must
-      present for that role. IAM role names cap at 64 characters and the
-      prefix takes 35, so keep user names to 29 characters or fewer;
-      letters, digits, and _+=,.@- only.
+      present for that role. Length bounds: the role-name prefix takes 34
+      of IAM's 64 characters (so keep names to 30 or fewer), and AWS
+      requires source identities to be at least 2 characters. Letters,
+      digits, and _+=,.@- only.
+    AllowedPattern: '^[A-Za-z0-9_+=,.@-]{2,30}$'
   ExternalId:
     Type: String
     Default: ''
@@ -38,8 +40,9 @@ Parameters:
       Optional external ID for additional confused-deputy protection.
       When set, every role's trust policy additionally requires
       sts:ExternalId to match, and the agent deployment must be
-      configured with the same value.
-    AllowedPattern: '^[A-Za-z0-9_=/+-]{0,1224}$'
+      configured with the same value. At least 2 characters when set (AWS
+      requirement).
+    AllowedPattern: '^$|^[A-Za-z0-9_+=,.@-]{2,1224}$'
   EnforceSessionName:
     Type: String
     Default: 'false'
