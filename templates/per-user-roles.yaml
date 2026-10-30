@@ -1,0 +1,176 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Namazu co-selling agent access (strict-accountability variant): one
+  ACE-Opportunity-Manager-<user> IAM role PER NAMED USER in this account,
+  each individually trusted, individually tagged, and separately
+  reviewable/revocable. Use this instead of opportunity-manager-role.yaml
+  when multiple people work co-selling in this account and you want each
+  one's access to be an independent role rather than a shared role keyed
+  by a tag. Same trust model per role: the Namazu hosting account may
+  assume it only with the matching per-user sts:SourceIdentity, so every
+  action is attributable in CloudTrail. Optional ExternalId and
+  per-user RoleSessionName pins apply to every role created.
+
+Transform: AWS::LanguageExtensions
+
+Parameters:
+  NamazuAccountId:
+    Type: String
+    Default: '308044622771'
+    Description: >
+      The AWS account ID of the Namazu hosting account to trust (the
+      principal the agent assumes from). Your Namazu contact will confirm
+      it; the default is Namazu Studios' production account.
+    AllowedPattern: '^[0-9]{12}$'
+  Users:
+    Type: CommaDelimitedList
+    Description: >
+      The individuals to create roles for (e.g. "peter,maria"). Each name
+      becomes its own role (ACE-Opportunity-Manager-<name>), its
+      AuthorizedUser tag, and the sts:SourceIdentity the agent must
+      present for that role. IAM role-name rules apply: letters, digits,
+      and _+=,.@- only.
+  ExternalId:
+    Type: String
+    Default: ''
+    Description: >
+      Optional external ID for additional confused-deputy protection.
+      When set, every role's trust policy additionally requires
+      sts:ExternalId to match, and the agent deployment must be
+      configured with the same value.
+    AllowedPattern: '^[A-Za-z0-9_=/+-]{0,1224}$'
+  EnforceSessionName:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >
+      When true, each role's trust policy additionally pins the
+      assume-role session name to '<user>-session' (the
+      strict-accountability convention). Each agent deployment for that
+      user must then use the matching session name.
+  ResourceScope:
+    Type: String
+    Default: '*'
+    Description: >
+      The Resource scope of the permission policy. Default '*'. Override
+      only if your compliance posture requires it; an unsupported value
+      will cause AccessDenied.
+  CatalogPin:
+    Type: String
+    Default: ''
+    AllowedValues: ['', 'AWS', 'Sandbox']
+    Description: >
+      Optional: pin every role's permission policy to one Partner Central
+      catalog via the partnercentral:Catalog condition key ('Sandbox'
+      limits the agent to AWS's isolated test catalog — recommended for
+      trials). Empty means no pin.
+
+Conditions:
+  HasExternalId: !Not [!Equals [!Ref ExternalId, '']]
+  HasSessionNamePin: !Equals [!Ref EnforceSessionName, 'true']
+  HasCatalogPin: !Not [!Equals [!Ref CatalogPin, '']]
+
+Resources:
+  # Fn::ForEach is the direct key under Resources (LanguageExtensions):
+  # each user in Users yields one AWS::IAM::Role whose logical id and
+  # RoleName carry the user — one independently revocable role per
+  # person, which is this template's whole point.
+  Fn::ForEach::PerUserRole:
+    - User
+    - !Ref Users
+    - 'ACEOpportunityManagerRole${User}':
+        Type: AWS::IAM::Role
+        Properties:
+          RoleName: !Sub 'ACE-Opportunity-Manager-${User}'
+          Description: !Sub >
+            Assumed cross-account by the Namazu co-selling agent
+            (source identity ${User}) to manage Partner Central
+            co-selling opportunities. Created by
+            namazu-apn-cloudformation.
+          AssumeRolePolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CrossAccountIdentityEnforcement
+                Effect: Allow
+                Principal:
+                  AWS: !Sub 'arn:aws:iam::${NamazuAccountId}:root'
+                Action:
+                  - sts:AssumeRole
+                  - sts:SetSourceIdentity
+                Condition:
+                  # Same shape as opportunity-manager-role.yaml's trust
+                  # condition, per user; nested Fn::If folds in the
+                  # optional ExternalId / RoleSessionName pins (a
+                  # Condition map can't carry two Fn::If keys).
+                  Fn::If:
+                    - HasExternalId
+                    - Fn::If:
+                        - HasSessionNamePin
+                        - StringEquals:
+                            sts:SourceIdentity: !Ref User
+                            sts:ExternalId: !Ref ExternalId
+                            sts:RoleSessionName: !Sub '${User}-session'
+                        - StringEquals:
+                            sts:SourceIdentity: !Ref User
+                            sts:ExternalId: !Ref ExternalId
+                    - Fn::If:
+                        - HasSessionNamePin
+                        - StringEquals:
+                            sts:SourceIdentity: !Ref User
+                            sts:RoleSessionName: !Sub '${User}-session'
+                        - StringEquals:
+                            sts:SourceIdentity: !Ref User
+          Tags:
+            - Key: AuthorizedUser
+              Value: !Ref User
+            - Key: ManagedBy
+              Value: namazu-apn-cloudformation
+          Policies:
+            - PolicyName: PartnerCentralOpportunityManagement
+              PolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                  - Sid: AllowPartnerCentralOpportunityManagement
+                    Effect: Allow
+                    Action:
+                      - partnercentral:CreateOpportunity
+                      - partnercentral:UpdateOpportunity
+                      - partnercentral:SubmitOpportunity
+                      - partnercentral:AssignOpportunity
+                      - partnercentral:AssociateOpportunity
+                      - partnercentral:DisassociateOpportunity
+                      - partnercentral:GetOpportunity
+                      - partnercentral:ListOpportunities
+                      - partnercentral:ListEngagementInvitations
+                      - partnercentral:GetEngagementInvitation
+                      - partnercentral:AcceptEngagementInvitation
+                      - partnercentral:RejectEngagementInvitation
+                      - partnercentral:GetAwsOpportunitySummary
+                      - partnercentral:ListSolutions
+                      - partnercentral:TagResource
+                      - partnercentral:UntagResource
+                      - partnercentral:ListTagsForResource
+                    Resource: !Ref ResourceScope
+                    Condition:
+                      Fn::If:
+                        - HasCatalogPin
+                        - StringEquals:
+                            partnercentral:Catalog: !Ref CatalogPin
+                        - !Ref AWS::NoValue
+
+Outputs:
+  # One output per user (ForEach directly under Outputs): each names the
+  # role ARN that user's agent deployment assumes.
+  Fn::ForEach::RoleArnOutputs:
+    - User
+    - !Ref Users
+    - 'RoleArn${User}':
+        Description: !Sub >
+          The role the Namazu co-selling agent assumes for ${User}. Give
+          it to your Namazu contact (along with the ExternalId, if you
+          set one) — it becomes that user's deployment role, with
+          ${User} as the source identity.
+        Value: !Sub 'arn:aws:iam::${AWS::AccountId}:role/ACE-Opportunity-Manager-${User}'
+  TemplateVersion:
+    Description: Template revision for support reference.
+    Value: '1.0.0'

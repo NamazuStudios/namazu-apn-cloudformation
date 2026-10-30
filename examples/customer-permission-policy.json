@@ -1,0 +1,29 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowPartnerCentralOpportunityManagement",
+      "Effect": "Allow",
+      "Action": [
+        "partnercentral:CreateOpportunity",
+        "partnercentral:UpdateOpportunity",
+        "partnercentral:SubmitOpportunity",
+        "partnercentral:AssignOpportunity",
+        "partnercentral:AssociateOpportunity",
+        "partnercentral:DisassociateOpportunity",
+        "partnercentral:GetOpportunity",
+        "partnercentral:ListOpportunities",
+        "partnercentral:ListEngagementInvitations",
+        "partnercentral:GetEngagementInvitation",
+        "partnercentral:AcceptEngagementInvitation",
+        "partnercentral:RejectEngagementInvitation",
+        "partnercentral:GetAwsOpportunitySummary",
+        "partnercentral:ListSolutions",
+        "partnercentral:TagResource",
+        "partnercentral:UntagResource",
+        "partnercentral:ListTagsForResource"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "EnablePeterCrossAccountACEAccess",
+      "Effect": "Allow",
+      "Action": [
+        "sts:AssumeRole",
+        "sts:SetSourceIdentity"
+      ],
+      "Resource": [
+        "arn:aws:iam::123456789012:role/ACE-Opportunity-Manager-Peter"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "sts:RoleSessionName": "peter-session"
+        }
+      }
+    }
+  ]
+}
