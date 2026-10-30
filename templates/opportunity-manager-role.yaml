@@ -11,6 +11,18 @@ Description: >
   separated roles, use per-user-roles.yaml instead.
 
 Parameters:
+  RoleName:
+    Type: String
+    Default: 'Namazu-CoSell-Opportunity-Manager'
+    Description: >
+      The role's name. The Namazu-CoSell-Opportunity-Manager prefix is
+      fixed (it keeps the third-party access instantly identifiable in
+      your IAM console, and the Namazu side gates its assumes to that
+      namespace — a fully custom name would not be assumable); you may
+      append a hyphenated suffix if the default name collides with an
+      existing role or your conventions call for one (e.g.
+      Namazu-CoSell-Opportunity-Manager-Prod). 64 characters total.
+    AllowedPattern: '^Namazu-CoSell-Opportunity-Manager(-[A-Za-z0-9_+=,.@-]{1,30})?$'
   NamazuAccountId:
     Type: String
     Default: '308044622771'
@@ -76,7 +88,7 @@ Resources:
   OpportunityManagerRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: Namazu-CoSell-Opportunity-Manager
+      RoleName: !Ref RoleName
       Description: >
         Assumed cross-account by the Namazu co-selling agent (with the
         AuthorizedUser source identity) to manage Partner Central

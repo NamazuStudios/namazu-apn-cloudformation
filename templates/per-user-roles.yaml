@@ -14,6 +14,21 @@ Description: >
 Transform: AWS::LanguageExtensions
 
 Parameters:
+  RoleNamePrefix:
+    Type: String
+    Default: 'Namazu-CoSell-Opportunity-Manager'
+    Description: >
+      The prefix of the per-user role names (each role is
+      <prefix>-<user>). The Namazu-CoSell-Opportunity-Manager prefix is
+      fixed (it keeps the third-party access instantly identifiable in
+      your IAM console, and the Namazu side gates its assumes to that
+      namespace — a fully custom prefix would not be assumable); you may
+      append a hyphenated suffix if the default collides with existing
+      roles or your conventions call for one (e.g.
+      Namazu-CoSell-Opportunity-Manager-Prod, yielding
+      ...-Prod-<user> roles). At most 60 characters, to leave room for
+      the per-user suffix within IAM's 64-character role-name cap.
+    AllowedPattern: '^Namazu-CoSell-Opportunity-Manager(-[A-Za-z0-9_+=,.@-]{1,26})?$'
   NamazuAccountId:
     Type: String
     Default: '308044622771'
@@ -26,12 +41,13 @@ Parameters:
     Type: CommaDelimitedList
     Description: >
       The individuals to create roles for (e.g. "peter,maria"). Each name
-      becomes its own role (Namazu-CoSell-Opportunity-Manager-<name>), its
-      AuthorizedUser tag, and the sts:SourceIdentity the agent must
-      present for that role. Length bounds: the role-name prefix takes 34
-      of IAM's 64 characters (so keep names to 30 or fewer), and AWS
-      requires source identities to be at least 2 characters. Letters,
-      digits, and _+=,.@- only.
+      becomes its own role (<RoleNamePrefix>-<name>), its AuthorizedUser
+      tag, and the sts:SourceIdentity the agent must present for that
+      role. Length bounds: at the default prefix each name may be up to
+      30 characters (IAM's 64-character role-name cap minus the
+      34-character prefix); a longer RoleNamePrefix shrinks that budget
+      accordingly. AWS requires source identities to be at least 2
+      characters. Letters, digits, and _+=,.@- only.
     AllowedPattern: '^[A-Za-z0-9_+=,.@-]{2,30}$'
   ExternalId:
     Type: String
@@ -85,7 +101,7 @@ Resources:
     - 'NamazuCoSellOpportunityManagerRole${User}':
         Type: AWS::IAM::Role
         Properties:
-          RoleName: !Sub 'Namazu-CoSell-Opportunity-Manager-${User}'
+          RoleName: !Sub '${RoleNamePrefix}-${User}'
           Description: !Sub >
             Assumed cross-account by the Namazu co-selling agent
             (source identity ${User}) to manage Partner Central
@@ -174,7 +190,7 @@ Outputs:
           it to your Namazu contact (along with the ExternalId, if you
           set one) — it becomes that user's deployment role, with
           ${User} as the source identity.
-        Value: !Sub 'arn:aws:iam::${AWS::AccountId}:role/Namazu-CoSell-Opportunity-Manager-${User}'
+        Value: !Sub 'arn:aws:iam::${AWS::AccountId}:role/${RoleNamePrefix}-${User}'
   TemplateVersion:
     Description: Template revision for support reference.
     Value: '1.0.0'

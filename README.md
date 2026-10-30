@@ -49,6 +49,7 @@ person (e.g. your account manager) is the co-selling contact.
 | Parameter | Required | What it does |
 |---|---|---|
 | `AuthorizedUser` | yes | The person this role is attributed to — becomes the source identity and the role's tag |
+| `RoleName` | no | The role's name (default `Namazu-CoSell-Opportunity-Manager`). The prefix is fixed — it keeps the access identifiable as ours and the agent's side gates assumes to that namespace — but you may append a hyphenated suffix (e.g. `…-Manager-Prod`) if the default collides or your conventions call for one |
 | `NamazuAccountId` | no | The Namazu hosting account to trust (default: Namazu Studios' production account — your contact will confirm) |
 | `ExternalId` | no | Adds an `sts:ExternalId` condition if you want extra confused-deputy protection |
 | `EnforceSessionName` | no | Pins the assume-role session name to `<user>-session` |
@@ -61,8 +62,17 @@ One `Namazu-CoSell-Opportunity-Manager-<user>` role **per named user** from the
 `Users` list (a comma-delimited list, e.g. `"peter,maria"`). Same trust
 and permission shape as above, per person — use this when several people
 work co-selling and you want each one's access to be an independent,
-separately revocable role. Takes the same parameters, with `Users`
-replacing `AuthorizedUser`.
+separately revocable role.
+
+| Parameter | Required | What it does |
+|---|---|---|
+| `Users` | yes | The individuals to create roles for — each becomes its own role, its `AuthorizedUser` tag, and its source identity (2–30 characters at the default prefix) |
+| `RoleNamePrefix` | no | The prefix of the per-user role names (default `Namazu-CoSell-Opportunity-Manager`, yielding `…-Manager-<user>`). The prefix is fixed for the same reasons as the shared template's `RoleName` — identifiability, and the Namazu side gates its assumes to that namespace — but a hyphenated suffix is allowed (e.g. `…-Manager-Prod` yields `…-Manager-Prod-<user>` roles) |
+| `NamazuAccountId` | no | The Namazu hosting account to trust (default: Namazu Studios' production account — your contact will confirm) |
+| `ExternalId` | no | Adds an `sts:ExternalId` condition to every role if you want extra confused-deputy protection |
+| `EnforceSessionName` | no | Pins each role's assume-role session name to `<user>-session` |
+| `ResourceScope` | no | Narrows the permission policy's `Resource` (default `*`) |
+| `CatalogPin` | no | Pins every role to one Partner Central catalog (`Sandbox` for trials, `AWS` for production) |
 
 The `examples/` directory carries the plain policy JSON these templates
 embed (the trust policy, the permission policy, and the per-user policy
