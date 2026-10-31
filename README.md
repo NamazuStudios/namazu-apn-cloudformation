@@ -79,6 +79,28 @@ embed (the trust policy, the permission policy, and the per-user policy
 shape) if you want to review the exact IAM documents or recreate them by
 hand.
 
+## Quick start: the interactive manager
+
+`manage-access.sh` manages the per-user model end to end — add a user
+(it creates or updates the CloudFormation stack), list the current users
+with their role ARNs, remove a user, or tear the whole stack down:
+
+```bash
+./manage-access.sh                      # menu: add / list / remove / delete
+./manage-access.sh --region us-east-1   # or --stack-name to manage another stack
+```
+
+Requirements: bash and the AWS CLI, authenticated as a principal allowed
+to create IAM roles in the account linked to your Partner Central
+account. Nothing else — no `jq`. The script re-passes every existing
+stack parameter on each update, so optional settings chosen at creation
+(an external ID, a catalog pin) are preserved when users are added or
+removed. After each change it prints the role ARNs to hand to your
+Namazu contact.
+
+For the single-user shared-role model — or if you prefer not to use the
+script — the direct deploy flow follows.
+
 ## Using a template
 
 From your AWS account **linked to Partner Central** (the account

@@ -1,0 +1,28 @@
+name: ci
+# Lint the customer-facing surface of this repo: the interactive manager
+# script (syntax + shellcheck), and both CloudFormation templates
+# (cfn-lint). No AWS credentials needed — pure static checks.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: manage-access.sh — syntax + shellcheck
+        run: |
+          bash -n manage-access.sh
+          command -v shellcheck >/dev/null || sudo apt-get install -y -qq shellcheck
+          shellcheck manage-access.sh
+
+      - name: CloudFormation templates — cfn-lint
+        run: |
+          pipx install cfn-lint
+          ~/.local/bin/cfn-lint templates/*.yaml
+
+      - name: Example policy JSON validity
+        run: for f in examples/*.json; do jq empty "$f"; done && echo "examples OK"
