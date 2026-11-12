@@ -143,6 +143,8 @@ MIT — see [LICENSE](LICENSE).
 
 **AGPL-3.0** — see [LICENSE](LICENSE).
 
+Part of the [Namazu Cloud Addon system](https://github.com/NamazuStudios/namazu-cloud-addon).
+
 This repository is made public for **transparency and visibility**: the
 co-sell role shape here is the tenant-account half of the Namazu co-selling
 agent story on Namazu Cloud, paired with the
