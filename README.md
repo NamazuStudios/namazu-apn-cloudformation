@@ -138,3 +138,25 @@ representative.
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## License & provenance
+
+**AGPL-3.0** — see [LICENSE](LICENSE).
+
+This repository is made public for **transparency and visibility**: the
+co-sell role shape here is the tenant-account half of the Namazu co-selling
+agent story on Namazu Cloud, paired with the
+[namazu-cloud-addon-agent-apn](https://github.com/NamazuStudios/namazu-cloud-addon-agent-apn)
+official addon. It is written for Namazu Studios and Namazu Cloud use;
+derivative works are expected to come back upstream to `NamazuStudios`,
+no exceptions.
+
+## AGPL waiver for delivered work
+
+Namazu Studios, as the copyright holder, **waives all AGPL obligations for
+software installed through a purchase or other business arrangement
+between Namazu Studios and the client.** The AGPL terms above govern the
+code as published in this repository; work delivered to you under
+contract — including anything installed on your behalf by Namazu Studios —
+is delivered under that agreement, not under the license's reciprocity
+terms.
