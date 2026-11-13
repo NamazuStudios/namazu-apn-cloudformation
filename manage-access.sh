@@ -134,18 +134,29 @@ trap 'cleanup_snapshot; exit 130' INT TERM
 snap_status() { cat "$SNAP_DIR/status" 2>/dev/null; }
 snap_users()  { cat "$SNAP_DIR/users"  2>/dev/null; }
 
+# One stack parameter from the current snapshot (empty when absent).
+snap_param() { # $1 = parameter key
+  awk -F'\t' -v k="$1" '$1 == k { print $2 }' "$SNAP_DIR/params" 2>/dev/null
+}
+
 # `aws cloudformation deploy` resets any parameter it is NOT given back to
 # the template's default — so before any update we read the stack's current
-# parameters and re-pass every one of them, substituting only Users. Without
-# this, adding a second user would silently wipe a CatalogPin or ExternalId
-# set at creation time.
-deploy_with_users() { # $1 = the new comma-separated Users value
+# parameters and re-pass every one of them, substituting only the values the
+# caller asks for. Without this, adding a second user (or changing the
+# catalog) would silently wipe a CatalogPin or ExternalId set at creation
+# time.
+deploy_with_overrides() { # $@ = KEY=VALUE pairs to substitute into the snapshot
   [[ -n "$SNAP_DIR" ]] || snapshot_stack
-  local new_users="$1" k v
+  local -A ov=()
+  local pair k v
+  for pair in "$@"; do
+    k="${pair%%=*}"
+    ov["$k"]="${pair#*=}"
+  done
   local overrides=()
   while IFS=$'\t' read -r k v; do
     [[ -n "$k" ]] || continue
-    [[ "$k" == "Users" ]] && v="$new_users"
+    [[ -n "${ov["$k"]+x}" ]] && v="${ov["$k"]}"
     overrides+=("$k=$v")
   done < "$SNAP_DIR/params"
   aws cloudformation deploy \
@@ -153,6 +164,10 @@ deploy_with_users() { # $1 = the new comma-separated Users value
     --stack-name "$STACK_NAME" \
     --capabilities CAPABILITY_NAMED_IAM \
     --parameter-overrides ${overrides[@]+"${overrides[@]}"}
+}
+
+deploy_with_users() { # $1 = the new comma-separated Users value
+  deploy_with_overrides "Users=$1"
 }
 
 events_hint() {
@@ -376,6 +391,12 @@ list_users() {
   status="$(snap_status)"
   [[ -n "$status" ]] || { echo "no stack $STACK_NAME yet — nothing to list (option 1 creates it)"; return 0; }
   echo "stack: $STACK_NAME ($status)"
+  local catalog extid sesspin
+  catalog="$(snap_param CatalogPin)"
+  extid="$(snap_param ExternalId)"
+  sesspin="$(snap_param EnforceSessionName)"
+  say "catalog: ${catalog:-<unset>} — enforced by IAM on every role in this stack"
+  say "external ID: ${extid:+set}${extid:-none}   session-name pin: ${sesspin:-false}"
   users="$(snap_users)"
   if [[ -z "$users" || "$users" == "None" ]]; then
     echo "no users in the stack"
@@ -383,6 +404,41 @@ list_users() {
   fi
   say "current users and their role ARNs:"
   print_role_arns
+}
+
+# change_catalog — show the stack's current catalog and switch it. The
+# catalog is enforced by IAM (the partnercentral:Catalog condition on
+# every role), so this is the gate: Sandbox while trialing, AWS for
+# production, Both for the move between them. Every other parameter is
+# preserved.
+change_catalog() {
+  updatable_stack || return 1
+  local cur
+  cur="$(snap_param CatalogPin)"
+  say "current catalog: ${cur:-<unset>}"
+  say "  'Sandbox'  AWS's isolated test catalog — placeholder data, safe to trial against
+  'AWS'      production — real opportunities and engagement invitations
+  'Both'     grants both — only for moving to production co-sell work.
+  There is no unpinned option: an operator always chooses. The agent-side
+  catalog hint should be updated to match; the IAM condition decides."
+  confirm "change the catalog?" || { echo "aborted"; return 0; }
+  local v=""
+  read -r -p "new catalog — Sandbox, AWS, or Both: " v || true
+  case "$v" in
+    Sandbox|AWS|Both) ;;
+    *) die "catalog must be Sandbox, AWS, or Both" ;;
+  esac
+  [[ "$v" == "$cur" ]] && { say "already $v — nothing to do"; return 0; }
+  say "users after this change: $(snap_users)"
+  confirm "redeploy $STACK_NAME with catalog $v?" || { echo "aborted"; return 0; }
+  if deploy_with_overrides "CatalogPin=$v" \
+     && snapshot_stack \
+     && [[ "$(snap_status)" == *_COMPLETE ]]; then
+    say "done. catalog is now: $(snap_param CatalogPin)"
+    say "remember to update the agent-side catalog hint to match (the IAM condition decides either way)."
+  else
+    echo "deploy failed"; events_hint; return 1
+  fi
 }
 
 remove_user() {
@@ -521,7 +577,9 @@ THE MODEL
    step 3  hand the new role ARN to your Namazu contact.
 
 3) LIST CURRENT USERS
-   Shows the stack status, every user, and their role ARN. Read-only.
+   Shows the stack status, the catalog in force (enforced by IAM),
+   whether an external ID / session pin is set, every user, and their
+   role ARN. Read-only.
 
 4) LIST CANDIDATE USERS
    A best-effort, read-only sweep of classic IAM users and IAM
@@ -542,7 +600,17 @@ THE MODEL
            Users list — the template forbids that, so the script
            offers to delete the whole stack instead.
 
-6) DELETE THE ACCESS STACK
+6) CHANGE THE CATALOG
+   Shows the catalog currently in force and switches it between
+   'Sandbox' (AWS's isolated test catalog — placeholder data),
+   'AWS' (production — real opportunities), and 'Both'. The choice is
+   enforced by IAM: every role in the stack carries a
+   partnercentral:Catalog condition. Every other parameter (users,
+   external ID, session pin) is preserved. There is no unpinned
+   option: an operator always chooses. Update the agent-side catalog
+   hint to match — the IAM condition decides either way.
+
+7) DELETE THE ACCESS STACK
    Deletes the stack and EVERY user role in it; all Namazu agent
    access stops immediately. Reversible only by recreating (option 1)
    and re-sharing the fresh role ARNs.
@@ -554,8 +622,9 @@ FIELD REFERENCE
   external ID   optional shared secret for assume-role (2+ chars,
                 same charset). Only set it with your Namazu contact's
                 agreement — misconfigured means every assume is denied.
-  catalog pin   'AWS' (production) or 'Sandbox' (AWS's test catalog);
-                blank = no restriction.
+  catalog       'Sandbox', 'AWS', or 'Both' (see option 6); default
+                Sandbox. Enforced by IAM — the agent-side catalog hint
+                should match.
   session pin   forces sessions to be named '<user>-session'; enable
                 only if the Namazu side configures session names.
 
@@ -575,10 +644,11 @@ while true; do
   echo
   echo "  1) Create the access stack (first-time setup)."
   echo "  2) Add a user."
-  echo "  3) List current users and their role ARNs."
+  echo "  3) List current users, their role ARNs, and the catalog."
   echo "  4) List candidate users (IAM / IAM Identity Center)."
   echo "  5) Remove a user."
-  echo "  6) Delete the access stack entirely."
+  echo "  6) Change the catalog (Sandbox / AWS / Both)."
+  echo "  7) Delete the access stack entirely."
   echo "  h) Help — what each option does, step by step."
   echo "  q) Quit."
   read -r -p "> " choice || { echo; exit 0; }
@@ -588,9 +658,10 @@ while true; do
     3) list_users ;;
     4) list_iam_candidates ;;
     5) remove_user ;;
-    6) delete_stack ;;
+    6) change_catalog ;;
+    7) delete_stack ;;
     h|H) show_help ;;
     q|Q) exit 0 ;;
-    *) echo "Invalid choice — please enter 1–6, h, or q." ;;
+    *) echo "Invalid choice — please enter 1–7, h, or q." ;;
   esac
 done
