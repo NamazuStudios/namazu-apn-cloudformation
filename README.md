@@ -81,12 +81,17 @@ hand.
 
 ## Quick start: the interactive manager
 
-`manage-access.sh` manages the per-user model end to end — add a user
-(it creates or updates the CloudFormation stack), list the current users
-with their role ARNs, remove a user, or tear the whole stack down:
+`manage-access.sh` manages the per-user model end to end: create the
+CloudFormation stack (option 1, first-time setup), add a user, list the
+current users with their role ARNs, list candidate user names harvested
+from classic IAM and IAM Identity Center, remove a user, or tear the
+whole stack down. The menu header shows the stack's live status, and the
+menu's help option (`h`) walks through every task step by step with a
+field reference. The candidate list is only a convenience — names are
+still validated against the 30-character role-name budget at input time:
 
 ```bash
-./manage-access.sh                      # menu: add / list / remove / delete
+./manage-access.sh                      # menu: create / add / list / candidates / remove / delete
 ./manage-access.sh --region us-east-1   # or --stack-name to manage another stack
 ```
 
@@ -142,6 +147,8 @@ MIT — see [LICENSE](LICENSE).
 ## License & provenance
 
 **AGPL-3.0** — see [LICENSE](LICENSE).
+
+Copyright 2026 Namazu Studios LLC.
 
 Part of the [Namazu Cloud Addon system](https://github.com/NamazuStudios/namazu-cloud-addon).
 
