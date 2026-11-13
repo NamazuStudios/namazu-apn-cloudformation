@@ -78,18 +78,71 @@ Parameters:
       via the partnercentral:Catalog condition key. 'Sandbox' limits the
       agent to AWS's isolated test catalog (recommended for trials);
       'AWS' limits it to production. Empty means no pin.
+  AgentRoleArns:
+    Type: CommaDelimitedList
+    Default: ''
+    Description: >
+      Optional: exact IAM role ARNs allowed to assume this role. When
+      Namazu's agent runs INSIDE this account (the internal-trial case —
+      its pod identity is a per-workspace IRSA role here), list those
+      roles so the trust no longer relies on the account-root principal:
+      e.g.
+      arn:aws:iam::<account>:role/bedrock-irsa-<workspace1>-us-east-1,arn:aws:iam::<account>:role/bedrock-irsa-<workspace2>-us-east-1.
+      The sts:SourceIdentity condition still applies to every principal.
+      Leave empty (the default) for the cross-account customer case,
+      which trusts the account root.
+  ManagedByTag:
+    Type: String
+    Default: 'namazu-apn-cloudformation'
+    Description: >
+      Value of the ManagedBy tag. When another component manages this
+      role's lifecycle alongside the stack (the addon tags it with its
+      own id), set this to the same value so drift detection doesn't
+      flag a tag the other side re-applies.
+    AllowedPattern: '^[A-Za-z0-9_.-]{1,128}$'
+  WorkspaceIdTag:
+    Type: String
+    Default: ''
+    Description: >
+      Optional value for the cloud.namazustudios.com/workspace_id tag —
+      the platform's cost/attribution tag, applied by the addon. Empty
+      (the default) omits the tag (the external-customer case).
+    AllowedPattern: '^$|^[a-f0-9]{24}$'
+  OrganizationIdTag:
+    Type: String
+    Default: ''
+    Description: >
+      Optional value for the cloud.namazustudios.com/organization_id tag
+      (the platform's organization attribution). Empty omits the tag.
+    AllowedPattern: '^$|^[a-f0-9]{24}$'
+  BillableTag:
+    Type: String
+    Default: ''
+    AllowedValues: ['', 'true', 'false']
+    Description: >
+      Optional value for the cloud.namazustudios.com/billable tag. Empty
+      omits the tag.
 
 Conditions:
   HasExternalId: !Not [!Equals [!Ref ExternalId, '']]
   HasSessionNamePin: !Equals [!Ref EnforceSessionName, 'true']
   HasCatalogPin: !Not [!Equals [!Ref CatalogPin, '']]
+  HasAgentRoleArns: !Not [!Equals [!Join ['', !Ref AgentRoleArns], '']]
+  HasWorkspaceIdTag: !Not [!Equals [!Ref WorkspaceIdTag, '']]
+  HasOrganizationIdTag: !Not [!Equals [!Ref OrganizationIdTag, '']]
+  HasBillableTag: !Not [!Equals [!Ref BillableTag, '']]
 
 Resources:
   OpportunityManagerRole:
     Type: AWS::IAM::Role
+    # Retain on delete: this role is the customer's identity anchor for
+    # every co-selling session — deleting it would sever live access, and
+    # import (the path that brings an already-deployed role under stack
+    # management) requires an explicit DeletionPolicy.
+    DeletionPolicy: Retain
     Properties:
       RoleName: !Ref RoleName
-      Description: >
+      Description: >-
         Assumed cross-account by the Namazu co-selling agent (with the
         AuthorizedUser source identity) to manage Partner Central
         co-selling opportunities. Created by namazu-apn-cloudformation.
@@ -99,7 +152,15 @@ Resources:
           - Sid: CrossAccountIdentityEnforcement
             Effect: Allow
             Principal:
-              AWS: !Sub 'arn:aws:iam::${NamazuAccountId}:root'
+              # Internal-trial mode (AgentRoleArns set): trust exactly the
+              # agent pods' IRSA roles — the agent runs in this account,
+              # and a root-principal trust would let any principal in it
+              # present the source identity. Customer mode (default): the
+              # account root, as before.
+              AWS: !If
+                - HasAgentRoleArns
+                - !Ref AgentRoleArns
+                - !Sub 'arn:aws:iam::${NamazuAccountId}:root'
             Action:
               - sts:AssumeRole
               - sts:SetSourceIdentity
@@ -133,7 +194,22 @@ Resources:
         - Key: AuthorizedUser
           Value: !Ref AuthorizedUser
         - Key: ManagedBy
-          Value: namazu-apn-cloudformation
+          Value: !Ref ManagedByTag
+        - !If
+          - HasWorkspaceIdTag
+          - Key: cloud.namazustudios.com/workspace_id
+            Value: !Ref WorkspaceIdTag
+          - !Ref 'AWS::NoValue'
+        - !If
+          - HasOrganizationIdTag
+          - Key: cloud.namazustudios.com/organization_id
+            Value: !Ref OrganizationIdTag
+          - !Ref 'AWS::NoValue'
+        - !If
+          - HasBillableTag
+          - Key: cloud.namazustudios.com/billable
+            Value: !Ref BillableTag
+          - !Ref 'AWS::NoValue'
       Policies:
         - PolicyName: PartnerCentralOpportunityManagement
           PolicyDocument:
