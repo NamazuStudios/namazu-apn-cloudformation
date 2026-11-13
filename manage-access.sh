@@ -286,18 +286,22 @@ create_stack() {
     [[ "$v" =~ $EXTID_RE ]] || die "invalid external ID (at least 2 characters; letters/digits/_+=,.@- only)"
     extra+=("ExternalId=$v")
   fi
-  say "catalog pin (optional):
-  Partner Central has two catalogs: 'AWS' (production — real
-  opportunities) and 'Sandbox' (AWS's isolated test catalog). A pin
-  limits every role in this stack to that one catalog via an IAM
-  condition: 'Sandbox' while trialing so the agent cannot touch
-  production opportunities, 'AWS' for production, blank for none."
+  say "catalog:
+  Partner Central has two catalogs: 'Sandbox' (AWS's isolated test
+  catalog — placeholder data, safe to trial against) and 'AWS'
+  (production — real opportunities and engagement invitations). The
+  choice is enforced by IAM: every role in this stack gets a condition
+  limiting it to the chosen catalog. 'Both' grants both catalogs —
+  only for moving to production co-sell work. There is no unpinned
+  option: an operator always chooses. default: Sandbox."
   v=""
-  read -r -p "catalog pin — AWS, Sandbox, or blank for none (blank): " v || true
-  if [[ -n "$v" ]]; then
-    [[ "$v" == "AWS" || "$v" == "Sandbox" ]] || die "catalog pin must be AWS or Sandbox"
-    extra+=("CatalogPin=$v")
-  fi
+  read -r -p "catalog — Sandbox, AWS, or Both (Sandbox): " v || true
+  v="${v:-Sandbox}"
+  case "$v" in
+    Sandbox|AWS|Both) ;;
+    *) die "catalog must be Sandbox, AWS, or Both" ;;
+  esac
+  extra+=("CatalogPin=$v")
   say "session-name pin (optional):
   when enabled, each role only accepts sessions named '<user>-session'
   (e.g. peter-session) — one more thing enforced and visible in

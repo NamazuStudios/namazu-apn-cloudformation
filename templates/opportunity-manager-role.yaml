@@ -71,13 +71,17 @@ Parameters:
       posture requires it; an unsupported value will cause AccessDenied.
   CatalogPin:
     Type: String
-    Default: ''
-    AllowedValues: ['', 'AWS', 'Sandbox']
+    Default: 'Sandbox'
+    AllowedValues: ['Sandbox', 'AWS', 'Both']
     Description: >
-      Optional: pin the permission policy to one Partner Central catalog
-      via the partnercentral:Catalog condition key. 'Sandbox' limits the
-      agent to AWS's isolated test catalog (recommended for trials);
-      'AWS' limits it to production. Empty means no pin.
+      Which Partner Central catalog the agent may operate in, enforced by
+      IAM via the partnercentral:Catalog condition key: 'Sandbox' (AWS's
+      isolated test catalog — placeholder data, safe to trial against),
+      'AWS' (the production catalog — real opportunities and engagement
+      invitations), or 'Both' (grants both — use only when moving to
+      production co-sell work; there is no unpinned/implicit option: an
+      operator always chooses). The agent-side catalog hint should match;
+      the IAM condition is what actually decides.
   AgentRoleArns:
     Type: CommaDelimitedList
     Default: ''
@@ -126,7 +130,7 @@ Parameters:
 Conditions:
   HasExternalId: !Not [!Equals [!Ref ExternalId, '']]
   HasSessionNamePin: !Equals [!Ref EnforceSessionName, 'true']
-  HasCatalogPin: !Not [!Equals [!Ref CatalogPin, '']]
+  IsCatalogBoth: !Equals [!Ref CatalogPin, 'Both']
   HasAgentRoleArns: !Not [!Equals [!Join ['', !Ref AgentRoleArns], '']]
   HasWorkspaceIdTag: !Not [!Equals [!Ref WorkspaceIdTag, '']]
   HasOrganizationIdTag: !Not [!Equals [!Ref OrganizationIdTag, '']]
@@ -240,12 +244,17 @@ Resources:
                   - partnercentral:UntagResource
                   - partnercentral:ListTagsForResource
                 Resource: !Ref ResourceScope
+                # 'Both' is the operator's explicit both-catalogs grant, so
+                # no condition renders; either single choice renders the
+                # matching partnercentral:Catalog pin. (An explicit three-
+                # way toggle: an operator always chooses, there is no
+                # implicit no-pin option.)
                 Condition:
                   Fn::If:
-                    - HasCatalogPin
+                    - IsCatalogBoth
+                    - !Ref AWS::NoValue
                     - StringEquals:
                         partnercentral:Catalog: !Ref CatalogPin
-                    - !Ref AWS::NoValue
 
 Outputs:
   RoleArn:
