@@ -391,12 +391,19 @@ list_users() {
   status="$(snap_status)"
   [[ -n "$status" ]] || { echo "no stack $STACK_NAME yet — nothing to list (option 1 creates it)"; return 0; }
   echo "stack: $STACK_NAME ($status)"
-  local catalog extid sesspin
+  local catalog bencatalog outbound alliance extid sesspin
   catalog="$(snap_param CatalogPin)"
+  bencatalog="$(snap_param BenefitsCatalogPin)"
+  outbound="$(snap_param EnableOutboundEngagement)"
+  alliance="$(snap_param EnableAllianceConnections)"
   extid="$(snap_param ExternalId)"
   sesspin="$(snap_param EnforceSessionName)"
-  say "catalog: ${catalog:-<unset>} — enforced by IAM on every role in this stack"
-  say "external ID: ${extid:+set}${extid:-none}   session-name pin: ${sesspin:-false}"
+  say "IAM gates in force (change: options 6/7):"
+  say "  selling catalog:   ${catalog:-<unmanaged>}"
+  say "  funding catalog:   ${bencatalog:-<no funding grant in this stack template>}"
+  say "  outbound engagement [partner-initiated co-sell]: ${outbound:-<not a knob in this stack template>}"
+  say "  alliance connections [partner-to-partner]:       ${alliance:-<not a knob in this stack template>}"
+  say "  external ID: ${extid:+set}${extid:-none}   session-name pin: ${sesspin:-false}"
   users="$(snap_users)"
   if [[ -z "$users" || "$users" == "None" ]]; then
     echo "no users in the stack"

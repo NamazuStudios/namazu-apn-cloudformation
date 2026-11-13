@@ -93,6 +93,26 @@ Parameters:
       selling never silently enables production funding. An operator who
       wants production funding sets this explicitly (usually alongside
       CatalogPin=AWS).
+  EnableOutboundEngagement:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >
+      The partner-initiated co-sell motions: create engagements and
+      engagement invitations (bring AWS sellers onto partner-originated
+      opportunities), the engagement<->opportunity task machinery
+      (including the task that converts an accepted invitation into an
+      opportunity), prospecting, and resource snapshots. Default false —
+      the role stays receive-only until an operator opts in.
+  EnableAllianceConnections:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >
+      The Account API's partner-to-partner motions: connections and
+      connection invitations (alliance-led co-sell with other partners),
+      partner reads, and alliance-lead contact management. Default
+      false — alliance programs are a distinct AWS program lane.
   AgentRoleArns:
     Type: CommaDelimitedList
     Default: ''
@@ -143,6 +163,8 @@ Conditions:
   HasSessionNamePin: !Equals [!Ref EnforceSessionName, 'true']
   IsCatalogBoth: !Equals [!Ref CatalogPin, 'Both']
   IsBenefitsCatalogBoth: !Equals [!Ref BenefitsCatalogPin, 'Both']
+  IsOutboundEngagement: !Equals [!Ref EnableOutboundEngagement, 'true']
+  IsAllianceConnections: !Equals [!Ref EnableAllianceConnections, 'true']
   HasAgentRoleArns: !Not [!Equals [!Join ['', !Ref AgentRoleArns], '']]
   HasWorkspaceIdTag: !Not [!Equals [!Ref WorkspaceIdTag, '']]
   HasOrganizationIdTag: !Not [!Equals [!Ref OrganizationIdTag, '']]
@@ -309,6 +331,76 @@ Resources:
                 Action: ["s3:PutObject"]
                 Resource:
                   - arn:aws:s3:::aws-partner-central-marketplace-ephemeral-writeonly-files/*
+              # Partner-initiated co-sell motions, gated by
+              # EnableOutboundEngagement (statement omitted entirely when
+              # false — the receive-only posture). Action names derived
+              # from the CLI/botocore surface, PascalCase per the IAM
+              # convention the Benefits grant verified.
+              - Sid: OutboundEngagementMotions
+                # Gated by the matching Enable* toggle: Allow when true, an explicit
+                # Deny when false — fail-closed and visible in the policy
+                # (AWS::NoValue statement-list elements are rejected inside
+                # Fn::ForEach policies).
+                Effect: !If
+                  - IsOutboundEngagement
+                  - Allow
+                  - Deny
+                Action:
+                  - partnercentral:CreateEngagement
+                  - partnercentral:GetEngagement
+                  - partnercentral:ListEngagements
+                  - partnercentral:ListEngagementMembers
+                  - partnercentral:ListEngagementResourceAssociations
+                  - partnercentral:CreateEngagementContext
+                  - partnercentral:UpdateEngagementContext
+                  - partnercentral:CreateEngagementInvitation
+                  - partnercentral:StartEngagementByAcceptingInvitationTask
+                  - partnercentral:ListEngagementByAcceptingInvitationTasks
+                  - partnercentral:StartEngagementFromOpportunityTask
+                  - partnercentral:ListEngagementFromOpportunityTasks
+                  - partnercentral:StartOpportunityFromEngagementTask
+                  - partnercentral:ListOpportunityFromEngagementTasks
+                  - partnercentral:StartProspectingFromEngagementTask
+                  - partnercentral:ListProspectingFromEngagementTasks
+                  - partnercentral:GetProspectingFromEngagementTask
+                  - partnercentral:CreateResourceSnapshot
+                  - partnercentral:CreateResourceSnapshotJob
+                  - partnercentral:GetResourceSnapshot
+                  - partnercentral:ListResourceSnapshots
+                  - partnercentral:GetResourceSnapshotJob
+                  - partnercentral:ListResourceSnapshotJobs
+                  - partnercentral:StartResourceSnapshotJob
+                  - partnercentral:StopResourceSnapshotJob
+                  - partnercentral:DeleteResourceSnapshotJob
+                  - partnercentral:GetSellingSystemSettings
+                Resource: !Ref ResourceScope
+              - Sid: AllianceAndConnectionsMotions
+                # Gated by EnableAllianceConnections (same Allow/Deny pattern).
+                Effect: !If
+                  - IsAllianceConnections
+                  - Allow
+                  - Deny
+                Action:
+                  - partnercentral:ListPartners
+                  - partnercentral:GetPartner
+                  - partnercentral:ListConnections
+                  - partnercentral:GetConnection
+                  - partnercentral:CreateConnectionInvitation
+                  - partnercentral:CancelConnectionInvitation
+                  - partnercentral:AcceptConnectionInvitation
+                  - partnercentral:RejectConnectionInvitation
+                  - partnercentral:ListConnectionInvitations
+                  - partnercentral:GetConnectionInvitation
+                  - partnercentral:CancelConnection
+                  - partnercentral:GetConnectionPreferences
+                  - partnercentral:UpdateConnectionPreferences
+                  - partnercentral:GetAllianceLeadContact
+                  - partnercentral:PutAllianceLeadContact
+                  - partnercentral:GetProfileVisibility
+                  - partnercentral:PutProfileVisibility
+                  - partnercentral:GetVerification
+                  - partnercentral:StartVerification
+                Resource: !Ref ResourceScope
 
 Outputs:
   RoleArn:

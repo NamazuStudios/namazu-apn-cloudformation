@@ -88,11 +88,43 @@ Parameters:
       moving to production co-sell work; there is no unpinned/implicit
       option: an operator always chooses). The agent-side catalog hint
       should match; the IAM condition is what actually decides.
+  BenefitsCatalogPin:
+    Type: String
+    Default: 'Sandbox'
+    AllowedValues: ['Sandbox', 'AWS', 'Both']
+    Description: >
+      The catalog choice for the Benefits (funding) API — separate from
+      CatalogPin because funding applications are real-money asks:
+      defaulting to Sandbox means enabling production selling never
+      silently enables production funding. Every role in this stack
+      carries this pin independently of the selling pin.
+  EnableOutboundEngagement:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >
+      The partner-initiated co-sell motions for every role in this
+      stack: create engagements and engagement invitations (bring AWS
+      sellers onto partner-originated opportunities), the
+      engagement<->opportunity task machinery, prospecting, and resource
+      snapshots. Default false — receive-only until an operator opts in.
+  EnableAllianceConnections:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >
+      The Account API's partner-to-partner motions for every role in
+      this stack: connections and connection invitations (alliance-led
+      co-sell with other partners), partner reads, and alliance-lead
+      contact management. Default false.
 
 Conditions:
   HasExternalId: !Not [!Equals [!Ref ExternalId, '']]
   HasSessionNamePin: !Equals [!Ref EnforceSessionName, 'true']
   IsCatalogBoth: !Equals [!Ref CatalogPin, 'Both']
+  IsBenefitsCatalogBoth: !Equals [!Ref BenefitsCatalogPin, 'Both']
+  IsOutboundEngagement: !Equals [!Ref EnableOutboundEngagement, 'true']
+  IsAllianceConnections: !Equals [!Ref EnableAllianceConnections, 'true']
 
 Resources:
   # Fn::ForEach is the direct key under Resources (LanguageExtensions):
@@ -184,6 +216,109 @@ Resources:
                         - !Ref AWS::NoValue
                         - StringEquals:
                             partnercentral:Catalog: !Ref CatalogPin
+                  # Funding (Benefits API) — governed by
+                  # BenefitsCatalogPin, deliberately separate from the
+                  # selling pin (real-money asks). 17/17
+                  # partnercentral-benefits operations minus the three
+                  # tag actions, which ride the statement above.
+                  - Sid: BenefitsManagement
+                    Effect: Allow
+                    Action:
+                      - partnercentral:ListBenefits
+                      - partnercentral:GetBenefit
+                      - partnercentral:CreateBenefitApplication
+                      - partnercentral:AmendBenefitApplication
+                      - partnercentral:UpdateBenefitApplication
+                      - partnercentral:SubmitBenefitApplication
+                      - partnercentral:GetBenefitApplication
+                      - partnercentral:CancelBenefitApplication
+                      - partnercentral:RecallBenefitApplication
+                      - partnercentral:ListBenefitApplications
+                      - partnercentral:AssociateBenefitApplicationResource
+                      - partnercentral:DisassociateBenefitApplicationResource
+                      - partnercentral:ListBenefitAllocations
+                      - partnercentral:GetBenefitAllocation
+                    Resource: !Ref ResourceScope
+                    Condition:
+                      Fn::If:
+                        - IsBenefitsCatalogBoth
+                        - !Ref AWS::NoValue
+                        - StringEquals:
+                            partnercentral:Catalog: !Ref BenefitsCatalogPin
+                  # Benefit-application attachments (AWS's ephemeral
+                  # write-only bucket; catalog-agnostic).
+                  - Sid: S3PutObjectAccess
+                    Effect: Allow
+                    Action: ["s3:PutObject"]
+                    Resource:
+                      - arn:aws:s3:::aws-partner-central-marketplace-ephemeral-writeonly-files/*
+                  # Partner-initiated co-sell motions, gated by
+                  # EnableOutboundEngagement (omitted when false).
+                  - Sid: OutboundEngagementMotions
+                    # Gated by the matching Enable* toggle: Allow when true, an explicit
+                    # Deny when false — fail-closed and visible in the policy
+                    # (AWS::NoValue statement-list elements are rejected inside
+                    # Fn::ForEach policies).
+                    Effect: !If
+                      - IsOutboundEngagement
+                      - Allow
+                      - Deny
+                    Action:
+                      - partnercentral:CreateEngagement
+                      - partnercentral:GetEngagement
+                      - partnercentral:ListEngagements
+                      - partnercentral:ListEngagementMembers
+                      - partnercentral:ListEngagementResourceAssociations
+                      - partnercentral:CreateEngagementContext
+                      - partnercentral:UpdateEngagementContext
+                      - partnercentral:CreateEngagementInvitation
+                      - partnercentral:StartEngagementByAcceptingInvitationTask
+                      - partnercentral:ListEngagementByAcceptingInvitationTasks
+                      - partnercentral:StartEngagementFromOpportunityTask
+                      - partnercentral:ListEngagementFromOpportunityTasks
+                      - partnercentral:StartOpportunityFromEngagementTask
+                      - partnercentral:ListOpportunityFromEngagementTasks
+                      - partnercentral:StartProspectingFromEngagementTask
+                      - partnercentral:ListProspectingFromEngagementTasks
+                      - partnercentral:GetProspectingFromEngagementTask
+                      - partnercentral:CreateResourceSnapshot
+                      - partnercentral:CreateResourceSnapshotJob
+                      - partnercentral:GetResourceSnapshot
+                      - partnercentral:ListResourceSnapshots
+                      - partnercentral:GetResourceSnapshotJob
+                      - partnercentral:ListResourceSnapshotJobs
+                      - partnercentral:StartResourceSnapshotJob
+                      - partnercentral:StopResourceSnapshotJob
+                      - partnercentral:DeleteResourceSnapshotJob
+                      - partnercentral:GetSellingSystemSettings
+                    Resource: !Ref ResourceScope
+                  - Sid: AllianceAndConnectionsMotions
+                    # Gated by EnableAllianceConnections (same Allow/Deny pattern).
+                    Effect: !If
+                      - IsAllianceConnections
+                      - Allow
+                      - Deny
+                    Action:
+                      - partnercentral:ListPartners
+                      - partnercentral:GetPartner
+                      - partnercentral:ListConnections
+                      - partnercentral:GetConnection
+                      - partnercentral:CreateConnectionInvitation
+                      - partnercentral:CancelConnectionInvitation
+                      - partnercentral:AcceptConnectionInvitation
+                      - partnercentral:RejectConnectionInvitation
+                      - partnercentral:ListConnectionInvitations
+                      - partnercentral:GetConnectionInvitation
+                      - partnercentral:CancelConnection
+                      - partnercentral:GetConnectionPreferences
+                      - partnercentral:UpdateConnectionPreferences
+                      - partnercentral:GetAllianceLeadContact
+                      - partnercentral:PutAllianceLeadContact
+                      - partnercentral:GetProfileVisibility
+                      - partnercentral:PutProfileVisibility
+                      - partnercentral:GetVerification
+                      - partnercentral:StartVerification
+                    Resource: !Ref ResourceScope
 
 Outputs:
   # One output per user (ForEach directly under Outputs): each names the
