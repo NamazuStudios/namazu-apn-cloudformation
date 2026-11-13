@@ -398,7 +398,7 @@ list_users() {
   alliance="$(snap_param EnableAllianceConnections)"
   extid="$(snap_param ExternalId)"
   sesspin="$(snap_param EnforceSessionName)"
-  say "IAM gates in force (change: options 6/7):"
+  say "IAM gates in force (change: options 6-9):"
   say "  selling catalog:   ${catalog:-<unmanaged>}"
   say "  funding catalog:   ${bencatalog:-<no funding grant in this stack template>}"
   say "  outbound engagement [partner-initiated co-sell]: ${outbound:-<not a knob in this stack template>}"
@@ -523,10 +523,12 @@ change_pin() {
   fi
 }
 
-change_catalogs() {
-  change_pin CatalogPin "selling catalog [partnercentral-selling]" "Sandbox AWS Both" || return 0
-  echo
-  change_pin BenefitsCatalogPin "funding catalog [partnercentral-benefits]" "Sandbox AWS Both" || return 0
+change_selling_catalog() {
+  change_pin CatalogPin "selling catalog [partnercentral-selling]" "Sandbox AWS Both"
+}
+
+change_funding_catalog() {
+  change_pin BenefitsCatalogPin "funding catalog [partnercentral-benefits]" "Sandbox AWS Both"
 }
 
 # change_motions — toggle the co-sell motions. Both prompts default to
@@ -732,20 +734,21 @@ THE MODEL
            Users list — the template forbids that, so the script
            offers to delete the whole stack instead.
 
-6) CHANGE THE CATALOGS
-   Two independent, explicit three-way gates, each enforced by IAM on
-   every role in the stack:
-     selling   partnercentral-selling — opportunities, invitations,
-               solutions ('Sandbox' trial / 'AWS' production / 'Both').
-     funding   partnercentral-benefits — funding applications, a
-               real-money ask, so its pin is SEPARATE from the selling
-               pin and defaults to Sandbox: enabling production selling
-               never silently enables production funding.
-   There is no unpinned option: an operator always chooses. Every
-   other parameter is preserved; update the agent-side catalog hint
-   to match (the IAM condition decides either way).
+6) CHANGE THE SELLING CATALOG
+   partnercentral-selling — opportunities, invitations, solutions.
+   Enforced by IAM on every role in the stack ('Sandbox' trial /
+   'AWS' production / 'Both'; there is no unpinned option: an
+   operator always chooses). Every other parameter is preserved;
+   update the agent-side catalog hint to match (the IAM condition
+   decides either way).
 
-7) CHANGE THE CO-SELL MOTIONS
+7) CHANGE THE FUNDING CATALOG
+   partnercentral-benefits — funding applications, a real-money ask,
+   so its pin is SEPARATE from the selling pin and defaults to
+   Sandbox: enabling production selling never silently enables
+   production funding. Same three-way choice, same enforcement.
+
+8) CHANGE THE CO-SELL MOTIONS
    Two on/off toggles, defaulting to off (receive-only):
      outbound engagement   engagements + engagement invitations to
                            bring AWS sellers onto partner-originated
@@ -759,7 +762,7 @@ THE MODEL
                            partner reads, alliance-lead contact.
    Both prompts default to keep-current; one redeploy applies both.
 
-8) EDIT THE TRUST WIRING
+9) EDIT THE TRUST WIRING
    The trust-side gates:
      agent role principals  (shared-role stacks) the IRSA roles
                             allowed to assume, one per agent
@@ -775,7 +778,7 @@ THE MODEL
                             match.
    Each change redeploys once and preserves every other parameter.
 
-9) DELETE THE ACCESS STACK
+0) DELETE THE ACCESS STACK
    Deletes the stack and EVERY user role in it; all Namazu agent
    access stops immediately. Reversible only by recreating (option 1)
    and re-sharing the fresh role ARNs.
@@ -788,9 +791,9 @@ FIELD REFERENCE
                 same charset). Only set it with your Namazu contact's
                 agreement — misconfigured means every assume is denied.
   catalogs      'Sandbox', 'AWS', or 'Both' for each of selling and
-                funding (see option 6); enforced by IAM.
+                funding (see options 6 and 7); enforced by IAM.
   motions       'true'/'false' toggles for outbound engagement and
-                alliance connections (see option 7).
+                alliance connections (see option 8).
   principals    (shared-role stacks) comma-separated IRSA role ARNs
                 trusted to assume (see option 8).
   session pin   forces sessions to be named '<user>-session'; enable
@@ -815,10 +818,11 @@ while true; do
   echo "  3) List users, role ARNs, and the IAM gates in force."
   echo "  4) List candidate users (IAM / IAM Identity Center)."
   echo "  5) Remove a user."
-  echo "  6) Change the catalogs (selling + funding: Sandbox / AWS / Both)."
-  echo "  7) Change the co-sell motions (outbound engagement / alliance)."
-  echo "  8) Edit the trust wiring (principals, external ID, session pin)."
-  echo "  9) Delete the access stack entirely."
+  echo "  6) Change the selling catalog (Sandbox / AWS / Both)."
+  echo "  7) Change the funding catalog (Sandbox / AWS / Both)."
+  echo "  8) Change the co-sell motions (outbound engagement / alliance)."
+  echo "  9) Edit the trust wiring (principals, external ID, session pin)."
+  echo "  0) Delete the access stack entirely."
   echo "  h) Help — what each option does, step by step."
   echo "  q) Quit."
   read -r -p "> " choice || { echo; exit 0; }
@@ -828,12 +832,13 @@ while true; do
     3) list_users ;;
     4) list_iam_candidates ;;
     5) remove_user ;;
-    6) change_catalogs ;;
-    7) change_motions ;;
-    8) edit_trust_wiring ;;
-    9) delete_stack ;;
+    6) change_selling_catalog ;;
+    7) change_funding_catalog ;;
+    8) change_motions ;;
+    9) edit_trust_wiring ;;
+    0) delete_stack ;;
     h|H) show_help ;;
     q|Q) exit 0 ;;
-    *) echo "Invalid choice — please enter 1–9, h, or q." ;;
+    *) echo "Invalid choice — please enter 1–9, 0, h, or q." ;;
   esac
 done
