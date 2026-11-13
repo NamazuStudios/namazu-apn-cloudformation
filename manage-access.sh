@@ -413,36 +413,159 @@ list_users() {
   print_role_arns
 }
 
-# change_catalog — show the stack's current catalog and switch it. The
-# catalog is enforced by IAM (the partnercentral:Catalog condition on
-# every role), so this is the gate: Sandbox while trialing, AWS for
-# production, Both for the move between them. Every other parameter is
-# preserved.
-change_catalog() {
+# change_param_free — like change_pin but for free-text parameters
+# validated by an AllowedPattern instead of a fixed choice list.
+change_param_free() {
   updatable_stack || return 1
+  local key="$1" label="$2" pattern="$3" hint="$4"
   local cur
-  cur="$(snap_param CatalogPin)"
-  say "current catalog: ${cur:-<unset>}"
-  say "  'Sandbox'  AWS's isolated test catalog — placeholder data, safe to trial against
-  'AWS'      production — real opportunities and engagement invitations
-  'Both'     grants both — only for moving to production co-sell work.
-  There is no unpinned option: an operator always chooses. The agent-side
-  catalog hint should be updated to match; the IAM condition decides."
-  confirm "change the catalog?" || { echo "aborted"; return 0; }
+  cur="$(snap_param "$key")"
+  if [[ -z "$cur" ]]; then
+    say "this stack's template doesn't carry $key — redeploy with the current template first."
+    return 1
+  fi
+  say "current $label: $cur"
+  say "  $hint"
+  confirm "change it?" || { echo "aborted"; return 0; }
   local v=""
-  read -r -p "new catalog — Sandbox, AWS, or Both: " v || true
-  case "$v" in
-    Sandbox|AWS|Both) ;;
-    *) die "catalog must be Sandbox, AWS, or Both" ;;
-  esac
-  [[ "$v" == "$cur" ]] && { say "already $v — nothing to do"; return 0; }
+  read -r -p "new value (blank keeps current): " v || true
+  [[ -z "$v" ]] && { say "kept current"; return 0; }
+  [[ "$v" =~ $pattern ]] || die "value does not match the required pattern"
+  [[ "$v" == "$cur" ]] && { say "already set — nothing to do"; return 0; }
   say "users after this change: $(snap_users)"
-  confirm "redeploy $STACK_NAME with catalog $v?" || { echo "aborted"; return 0; }
-  if deploy_with_overrides "CatalogPin=$v" \
+  confirm "redeploy $STACK_NAME with the new $key?" || { echo "aborted"; return 0; }
+  if deploy_with_overrides "$key=$v" \
      && snapshot_stack \
      && [[ "$(snap_status)" == *_COMPLETE ]]; then
-    say "done. catalog is now: $(snap_param CatalogPin)"
-    say "remember to update the agent-side catalog hint to match (the IAM condition decides either way)."
+    local newval
+    newval="$(snap_param "$key")"
+    say "done. $label is now: $newval"
+    say "the agent-side wiring must match; IAM decides either way."
+  else
+    echo "deploy failed"; events_hint; return 1
+  fi
+}
+
+# edit_trust_wiring — the trust-side gates: which principals may assume
+# (AgentRoleArns, one per agent workspace), the optional external ID, the
+# session-name pin, and (shared-role stacks only) the AuthorizedUser the
+# source identity must match. Each change redeploys once and preserves
+# every other parameter.
+edit_trust_wiring() {
+  updatable_stack || return 1
+  if [[ -n "$(snap_param AgentRoleArns)" ]]; then
+    say "agent role principals [AgentRoleArns] — the IRSA roles allowed to
+  assume this role, one per agent workspace; the sts:SourceIdentity
+  condition still applies to every one of them:"
+    snap_param AgentRoleArns | tr ',' '\n' | sed 's/^/    /'
+    local v=""
+    read -r -p "new comma-separated list (blank: keep current): " v || true
+    if [[ -n "$v" ]]; then
+      local r ok=1
+      local -a parts=()
+      IFS=',' read -ra parts <<< "$v"
+      for r in ${parts[@]+"${parts[@]}"}; do
+        [[ "$r" =~ ^arn:aws:iam::[0-9]{12}:role/ ]] || { echo "  not a role ARN: $r"; ok=0; }
+      done
+      if [[ "$ok" == 1 ]]; then
+        local joined
+        joined="$(IFS=','; echo "${parts[*]}")"
+        deploy_with_overrides "AgentRoleArns=$joined" \
+          && snapshot_stack \
+          && say "principals updated:"           && snap_param AgentRoleArns | tr ',' '\n' | sed 's/^/    /' \
+          || { echo "deploy failed"; events_hint; return 1; }
+      fi
+    fi
+  fi
+  echo
+  change_param_free ExternalId "external ID [confused-deputy protection]" '^[A-Za-z0-9_+=,.@-]{2,1224}$' "optional shared secret; the agent side must carry the same value or every assume is denied. Blank keeps the current value"
+  echo
+  change_pin EnforceSessionName "session-name pin" "true false"
+  echo
+  if [[ -n "$(snap_param AuthorizedUser)" ]]; then
+    change_param_free AuthorizedUser "AuthorizedUser [shared-role stacks]" '^[A-Za-z0-9_+=,.@-]{2,64}$' "the person every action is attributed to: changes the trust condition and the role tag; the agent-side source_identity must match. Per-user stacks bind identity per role via the Users list instead"
+  fi
+}
+
+# change_pin — show, confirm, and redeploy one stack parameter. The
+# generic gate-changing flow: every other parameter is preserved.
+change_pin() {
+  updatable_stack || return 1
+  local key="$1" label="$2" choices="$3"
+  local cur
+  cur="$(snap_param "$key")"
+  if [[ -z "$cur" ]]; then
+    say "this stack's template doesn't carry $key — redeploy with the current template first."
+    return 1
+  fi
+  say "current $label: $cur"
+  say "  allowed: $choices"
+  confirm "change it?" || { echo "aborted"; return 0; }
+  local v=""
+  read -r -p "new value, one of: $choices : " v || true
+  local ok=0
+  for c in $choices; do
+    [[ "$v" == "$c" ]] && ok=1
+  done
+  [[ "$ok" == 1 ]] || die "value must be one of: $choices"
+  [[ "$v" == "$cur" ]] && { say "already $v — nothing to do"; return 0; }
+  say "users after this change: $(snap_users)"
+  confirm "redeploy $STACK_NAME with $key=$v?" || { echo "aborted"; return 0; }
+  if deploy_with_overrides "$key=$v" \
+     && snapshot_stack \
+     && [[ "$(snap_status)" == *_COMPLETE ]]; then
+    local newval
+    newval="$(snap_param "$key")"
+    say "done. $label is now: $newval"
+    say "IAM re-evaluates per request; a live agent session picks this up at its next credential refresh, about 1h. Update the agent-side hint to match. IAM decides either way."
+  else
+    echo "deploy failed"; events_hint; return 1
+  fi
+}
+
+change_catalogs() {
+  change_pin CatalogPin "selling catalog [partnercentral-selling]" "Sandbox AWS Both" || return 0
+  echo
+  change_pin BenefitsCatalogPin "funding catalog [partnercentral-benefits]" "Sandbox AWS Both" || return 0
+}
+
+# change_motions — toggle the co-sell motions. Both prompts default to
+# keep-current; the redeploy happens once, with every other parameter
+# preserved.
+change_motions() {
+  updatable_stack || return 1
+  local outbound alliance
+  outbound="$(snap_param EnableOutboundEngagement)"
+  alliance="$(snap_param EnableAllianceConnections)"
+  if [[ -z "$outbound" && -z "$alliance" ]]; then
+    say "this stack's template doesn't carry the motion toggles — redeploy with the current template first."
+    return 1
+  fi
+  say "current motions:"
+  say "  outbound engagement [partner-initiated co-sell]: $outbound"
+  say "  alliance connections [partner-to-partner]:       $alliance"
+  local o="" a=""
+  if [[ -n "$outbound" ]]; then
+    say "  outbound engagement: engagements + invitations to bring AWS sellers onto partner-originated opportunities, the engagement/opportunity task machinery, prospecting, and resource snapshots."
+    confirm "change outbound engagement? currently $outbound" && { read -r -p "new value true/false, blank keeps $outbound: " o || true; [[ "$o" == "true" || "$o" == "false" ]] || o=""; }
+  fi
+  if [[ -n "$alliance" ]]; then
+    say "  alliance connections: partner-to-partner connections and invitations, alliance-led co-sell, partner reads, alliance-lead contact."
+    confirm "change alliance connections? currently $alliance" && { read -r -p "new value true/false, blank keeps $alliance: " a || true; [[ "$a" == "true" || "$a" == "false" ]] || a=""; }
+  fi
+  if [[ -z "$o" && -z "$a" ]]; then
+    say "nothing to change"
+    return 0
+  fi
+  local -a overrides=()
+  [[ -n "$o" ]] && overrides+=("EnableOutboundEngagement=$o")
+  [[ -n "$a" ]] && overrides+=("EnableAllianceConnections=$a")
+  say "users after this change: $(snap_users)"
+  confirm "redeploy $STACK_NAME with the new motion set?" || { echo "aborted"; return 0; }
+  if deploy_with_overrides ${overrides[@]+"${overrides[@]}"} \
+     && snapshot_stack \
+     && [[ "$(snap_status)" == *_COMPLETE ]]; then
+    say "done. motions now: outbound=$(snap_param EnableOutboundEngagement) alliance=$(snap_param EnableAllianceConnections)"
   else
     echo "deploy failed"; events_hint; return 1
   fi
@@ -583,10 +706,12 @@ THE MODEL
            external ID / catalog pin chosen at creation survives.
    step 3  hand the new role ARN to your Namazu contact.
 
-3) LIST CURRENT USERS
-   Shows the stack status, the catalog in force (enforced by IAM),
-   whether an external ID / session pin is set, every user, and their
-   role ARN. Read-only.
+3) LIST USERS AND THE IAM GATES IN FORCE
+   Shows the stack status, both catalog pins (selling and funding),
+   the motion toggles (outbound engagement, alliance connections),
+   the external ID / session-pin state, every user, and their role
+   ARN. Read-only. Anything the stack's template doesn't manage is
+   labeled as such.
 
 4) LIST CANDIDATE USERS
    A best-effort, read-only sweep of classic IAM users and IAM
@@ -607,17 +732,50 @@ THE MODEL
            Users list — the template forbids that, so the script
            offers to delete the whole stack instead.
 
-6) CHANGE THE CATALOG
-   Shows the catalog currently in force and switches it between
-   'Sandbox' (AWS's isolated test catalog — placeholder data),
-   'AWS' (production — real opportunities), and 'Both'. The choice is
-   enforced by IAM: every role in the stack carries a
-   partnercentral:Catalog condition. Every other parameter (users,
-   external ID, session pin) is preserved. There is no unpinned
-   option: an operator always chooses. Update the agent-side catalog
-   hint to match — the IAM condition decides either way.
+6) CHANGE THE CATALOGS
+   Two independent, explicit three-way gates, each enforced by IAM on
+   every role in the stack:
+     selling   partnercentral-selling — opportunities, invitations,
+               solutions ('Sandbox' trial / 'AWS' production / 'Both').
+     funding   partnercentral-benefits — funding applications, a
+               real-money ask, so its pin is SEPARATE from the selling
+               pin and defaults to Sandbox: enabling production selling
+               never silently enables production funding.
+   There is no unpinned option: an operator always chooses. Every
+   other parameter is preserved; update the agent-side catalog hint
+   to match (the IAM condition decides either way).
 
-7) DELETE THE ACCESS STACK
+7) CHANGE THE CO-SELL MOTIONS
+   Two on/off toggles, defaulting to off (receive-only):
+     outbound engagement   engagements + engagement invitations to
+                           bring AWS sellers onto partner-originated
+                           opportunities, the engagement<->opportunity
+                           task machinery (including converting an
+                           accepted invitation into an opportunity),
+                           prospecting, and resource snapshots.
+     alliance connections  the Account API's partner-to-partner
+                           motions: connections + connection
+                           invitations (alliance-led co-sell),
+                           partner reads, alliance-lead contact.
+   Both prompts default to keep-current; one redeploy applies both.
+
+8) EDIT THE TRUST WIRING
+   The trust-side gates:
+     agent role principals  (shared-role stacks) the IRSA roles
+                            allowed to assume, one per agent
+                            workspace; the source-identity condition
+                            applies to each.
+     external ID            optional shared secret for assume-role.
+     session-name pin       forces sessions to be named
+                            '<user>-session'.
+     AuthorizedUser         (shared-role stacks) the person every
+                            action is attributed to; changes the
+                            trust condition and the role tag, and
+                            the agent-side source_identity must
+                            match.
+   Each change redeploys once and preserves every other parameter.
+
+9) DELETE THE ACCESS STACK
    Deletes the stack and EVERY user role in it; all Namazu agent
    access stops immediately. Reversible only by recreating (option 1)
    and re-sharing the fresh role ARNs.
@@ -629,9 +787,12 @@ FIELD REFERENCE
   external ID   optional shared secret for assume-role (2+ chars,
                 same charset). Only set it with your Namazu contact's
                 agreement — misconfigured means every assume is denied.
-  catalog       'Sandbox', 'AWS', or 'Both' (see option 6); default
-                Sandbox. Enforced by IAM — the agent-side catalog hint
-                should match.
+  catalogs      'Sandbox', 'AWS', or 'Both' for each of selling and
+                funding (see option 6); enforced by IAM.
+  motions       'true'/'false' toggles for outbound engagement and
+                alliance connections (see option 7).
+  principals    (shared-role stacks) comma-separated IRSA role ARNs
+                trusted to assume (see option 8).
   session pin   forces sessions to be named '<user>-session'; enable
                 only if the Namazu side configures session names.
 
@@ -651,11 +812,13 @@ while true; do
   echo
   echo "  1) Create the access stack (first-time setup)."
   echo "  2) Add a user."
-  echo "  3) List current users, their role ARNs, and the catalog."
+  echo "  3) List users, role ARNs, and the IAM gates in force."
   echo "  4) List candidate users (IAM / IAM Identity Center)."
   echo "  5) Remove a user."
-  echo "  6) Change the catalog (Sandbox / AWS / Both)."
-  echo "  7) Delete the access stack entirely."
+  echo "  6) Change the catalogs (selling + funding: Sandbox / AWS / Both)."
+  echo "  7) Change the co-sell motions (outbound engagement / alliance)."
+  echo "  8) Edit the trust wiring (principals, external ID, session pin)."
+  echo "  9) Delete the access stack entirely."
   echo "  h) Help — what each option does, step by step."
   echo "  q) Quit."
   read -r -p "> " choice || { echo; exit 0; }
@@ -665,10 +828,12 @@ while true; do
     3) list_users ;;
     4) list_iam_candidates ;;
     5) remove_user ;;
-    6) change_catalog ;;
-    7) delete_stack ;;
+    6) change_catalogs ;;
+    7) change_motions ;;
+    8) edit_trust_wiring ;;
+    9) delete_stack ;;
     h|H) show_help ;;
     q|Q) exit 0 ;;
-    *) echo "Invalid choice — please enter 1–7, h, or q." ;;
+    *) echo "Invalid choice — please enter 1–9, h, or q." ;;
   esac
 done
