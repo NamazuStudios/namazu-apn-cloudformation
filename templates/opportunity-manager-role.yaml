@@ -82,6 +82,17 @@ Parameters:
       production co-sell work; there is no unpinned/implicit option: an
       operator always chooses). The agent-side catalog hint should match;
       the IAM condition is what actually decides.
+  BenefitsCatalogPin:
+    Type: String
+    Default: 'Sandbox'
+    AllowedValues: ['Sandbox', 'AWS', 'Both']
+    Description: >
+      The same three-way choice, but for the Benefits (funding) API —
+      kept SEPARATE from CatalogPin because funding applications are
+      real-money asks: defaulting to Sandbox means enabling production
+      selling never silently enables production funding. An operator who
+      wants production funding sets this explicitly (usually alongside
+      CatalogPin=AWS).
   AgentRoleArns:
     Type: CommaDelimitedList
     Default: ''
@@ -131,6 +142,7 @@ Conditions:
   HasExternalId: !Not [!Equals [!Ref ExternalId, '']]
   HasSessionNamePin: !Equals [!Ref EnforceSessionName, 'true']
   IsCatalogBoth: !Equals [!Ref CatalogPin, 'Both']
+  IsBenefitsCatalogBoth: !Equals [!Ref BenefitsCatalogPin, 'Both']
   HasAgentRoleArns: !Not [!Equals [!Join ['', !Ref AgentRoleArns], '']]
   HasWorkspaceIdTag: !Not [!Equals [!Ref WorkspaceIdTag, '']]
   HasOrganizationIdTag: !Not [!Equals [!Ref OrganizationIdTag, '']]
@@ -255,6 +267,48 @@ Resources:
                     - !Ref AWS::NoValue
                     - StringEquals:
                         partnercentral:Catalog: !Ref CatalogPin
+              # Funding (Benefits API) — governed by BenefitsCatalogPin,
+              # deliberately not by CatalogPin: production funding is a
+              # real-money ask and never silently inherits the selling
+              # catalog choice. Action list verified against the botocore
+              # service model (17/17 partnercentral-benefits operations —
+              # AWS's published sandbox policy carries a three-s
+              # Disasssociate typo and omits discovery/tagging actions).
+              # Tagging rides the statement above. Opportunity read rides
+              # the statement above (association re-validates it).
+              - Sid: BenefitsManagement
+                Effect: Allow
+                Action:
+                  - partnercentral:ListBenefits
+                  - partnercentral:GetBenefit
+                  - partnercentral:CreateBenefitApplication
+                  - partnercentral:AmendBenefitApplication
+                  - partnercentral:UpdateBenefitApplication
+                  - partnercentral:SubmitBenefitApplication
+                  - partnercentral:GetBenefitApplication
+                  - partnercentral:CancelBenefitApplication
+                  - partnercentral:RecallBenefitApplication
+                  - partnercentral:ListBenefitApplications
+                  - partnercentral:AssociateBenefitApplicationResource
+                  - partnercentral:DisassociateBenefitApplicationResource
+                  - partnercentral:ListBenefitAllocations
+                  - partnercentral:GetBenefitAllocation
+                Resource: !Ref ResourceScope
+                Condition:
+                  Fn::If:
+                    - IsBenefitsCatalogBoth
+                    - !Ref AWS::NoValue
+                    - StringEquals:
+                        partnercentral:Catalog: !Ref BenefitsCatalogPin
+              # Benefit-application file attachments upload to AWS's
+              # ephemeral write-only bucket (catalog-agnostic; the exact
+              # bucket name from the live authz errors — the Developer
+              # Guide's rendering drops a hyphen at a PDF line-wrap).
+              - Sid: S3PutObjectAccess
+                Effect: Allow
+                Action: ["s3:PutObject"]
+                Resource:
+                  - arn:aws:s3:::aws-partner-central-marketplace-ephemeral-writeonly-files/*
 
 Outputs:
   RoleArn:
