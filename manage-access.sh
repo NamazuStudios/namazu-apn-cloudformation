@@ -404,6 +404,12 @@ list_users() {
   say "  outbound engagement [partner-initiated co-sell]: ${outbound:-<not a knob in this stack template>}"
   say "  alliance connections [partner-to-partner]:       ${alliance:-<not a knob in this stack template>}"
   say "  external ID: ${extid:+set}${extid:-none}   session-name pin: ${sesspin:-false}"
+  if [[ -z "$(snap_param AgentRoleArns)" ]]; then
+    say "NOTE: this is a per-user stack — its gates bind the individual roles
+  listed below (each person's own agent deployment), NOT the shared role
+  a given agent deployment assumes. Check which role your deployment's
+  consume_role_arn points at, and manage THAT stack with --stack-name."
+  fi
   users="$(snap_users)"
   if [[ -z "$users" || "$users" == "None" ]]; then
     echo "no users in the stack"
