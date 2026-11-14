@@ -80,14 +80,19 @@ EOF
 }
 
 # ---- flags ------------------------------------------------------------------
+YES=0; JSON=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --stack-name) [[ $# -ge 2 ]] || die "--stack-name needs a value"; STACK_NAME="$2"; shift 2 ;;
     --region)     [[ $# -ge 2 ]] || die "--region needs a value"; AWS_DEFAULT_REGION="$2"; export AWS_DEFAULT_REGION; shift 2 ;;
+    --yes)        YES=1; shift ;;
+    --json)       JSON=1; shift ;;
     -h|--help)    usage; exit 0 ;;
-    *)            echo "unknown option: $1 (try --help)" >&2; exit 1 ;;
+    *)            break ;;   # first non-flag argument: the subcommand
   esac
 done
+COMMAND="${1:-}"
+[[ $# -gt 0 ]] && shift
 
 # ---- helpers ----------------------------------------------------------------
 stack_status() { # one lightweight round trip: just the stack status
@@ -778,13 +783,283 @@ CLI FLAGS
 EOF
 }
 
-# ---- menu -------------------------------------------------------------------
+# ---- gate registry -----------------------------------------------------------
+gate_param() {
+  case "$1" in
+    selling)        echo "CatalogPin" ;;
+    funding)        echo "BenefitsCatalogPin" ;;
+    outbound)       echo "EnableOutboundEngagement" ;;
+    alliance)       echo "EnableAllianceConnections" ;;
+    external-id)    echo "ExternalId" ;;
+    session-pin)    echo "EnforceSessionName" ;;
+    agents)         echo "AgentRoleArns" ;;
+    authorized-user) echo "AuthorizedUser" ;;
+    *) echo "" ;;
+  esac
+}
+
+gate_label() {
+  case "$1" in
+    selling)        echo "selling catalog" ;;
+    funding)        echo "funding catalog" ;;
+    outbound)       echo "outbound engagement [partner-initiated co-sell]" ;;
+    alliance)       echo "alliance connections [partner-to-partner]" ;;
+    external-id)    echo "external ID [confused-deputy protection]" ;;
+    session-pin)    echo "session-name pin" ;;
+    agents)         echo "agent role principals [shared-role stacks]" ;;
+    authorized-user) echo "AuthorizedUser [shared-role stacks]" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+validate_gate() {
+  local key="$1" val="$2"
+  case "$key" in
+    selling|funding)
+      case "$val" in Sandbox|AWS|Both) return 0 ;; esac ;;
+    outbound|alliance|session-pin)
+      case "$val" in true|false) return 0 ;; esac ;;
+    external-id)
+      [[ -z "$val" || "$val" =~ $EXTID_RE ]] && return 0 ;;
+    agents)
+      local r ok=1
+      local -a parts=()
+      IFS=',' read -ra parts <<< "$val"
+      for r in ${parts[@]+"${parts[@]}"}; do
+        [[ "$r" =~ ^arn:aws:iam::[0-9]{12}:role/ ]] || { ok=0; break; }
+      done
+      [[ ${#parts[@]} -ge 1 && "$ok" == 1 ]] && return 0 ;;
+    authorized-user)
+      [[ "$val" =~ ^[A-Za-z0-9_+=,.@-]{2,64}$ ]] && return 0 ;;
+  esac
+  return 1
+}
+
+# ---- ANSI --------------------------------------------------------------------
+C_G=$'\033[32m'; C_Y=$'\033[33m'; C_R=$'\033[31m'; C_D=$'\033[2m'; C_B=$'\033[1m'; C_0=$'\033[0m'
+
+gate_dot() {
+  local v="${2:-}"
+  case "$v" in
+    Both|true)  echo "${C_G}●${C_0} $v" ;;
+    Sandbox)    echo "${C_Y}●${C_0} $v" ;;
+    false|"")   echo "${C_D}○${C_0} ${v:-off}" ;;
+    *)          echo "${C_G}●${C_0} $v" ;;
+  esac
+}
+
+drift_dot() {
+  case "$1" in
+    IN_SYNC)     echo "${C_G}●${C_0} in-sync" ;;
+    DRIFTED)     echo "${C_R}●${C_0} DRIFTED" ;;
+    "")          echo "${C_D}●${C_0} never checked" ;;
+    *)           echo "${C_Y}●${C_0} $1" ;;
+  esac
+}
+
+# ---- per-stack state fetch ---------------------------------------------------
+# ONE describe-stacks round trip per stack; everything comes out on stdout
+# with prefixes (S: status, D: drift, P:<Key>=<Value>) — no globals, so the
+# parallel dashboard fetches cannot cross-contaminate.
+fetch_stack_state() { # $1 = stack name
+  local raw
+  raw="$(aws cloudformation describe-stacks --stack-name "$1" --output json 2>/dev/null)" || { echo "MISSING"; return 1; }
+  printf '%s' "$raw" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)['Stacks'][0]
+print('S:' + d.get('StackStatus', ''))
+print('D:' + (d.get('StackDriftStatus') or ''))
+for p in d.get('Parameters', []):
+    print('P:' + p['ParameterKey'] + '=' + p['ParameterValue'])
+" 2>/dev/null
+}
+
+field_of() { # $1 = fetched lines, $2 = prefix — $1 is an ARGUMENT, feed it to awk
+  awk -v pre="$2" 'index($0, pre) == 1 { sub("^" pre, ""); print; exit }' <<< "$1"
+}
+
+param_of() { # $1 = fetched lines, $2 = key
+  awk -v pre="P:" -v k="$2" 'index($0, pre k "=") == 1 { sub("^" pre k "=", ""); print; exit }' <<< "$1"
+}
+
+render_card() { # $1 = stack name
+  local stack="$1" fetched
+  fetched="$(fetch_stack_state "$stack")"
+  if [[ "$fetched" == "MISSING" || -z "$fetched" ]]; then
+    echo "┌─ $stack ──────────────────────────────────────────────"
+    echo "│  ${C_D}not created yet${C_0}"
+    echo "└───────────────────────────────────────────────────────"
+    return 0
+  fi
+  local status drift selling funding outbound alliance extid sesspin users agents auser title warn
+  status="$(field_of "$fetched" "S:")"
+  drift="$(field_of "$fetched" "D:")"
+  selling="$(param_of "$fetched" CatalogPin)"
+  funding="$(param_of "$fetched" BenefitsCatalogPin)"
+  outbound="$(param_of "$fetched" EnableOutboundEngagement)"
+  alliance="$(param_of "$fetched" EnableAllianceConnections)"
+  extid="$(param_of "$fetched" ExternalId)"
+  sesspin="$(param_of "$fetched" EnforceSessionName)"
+  users="$(param_of "$fetched" Users)"
+  agents="$(param_of "$fetched" AgentRoleArns)"
+  auser="$(param_of "$fetched" AuthorizedUser)"
+  if [[ -n "$users" && "$users" != "None" ]]; then
+    title="per-user stack"
+    warn="${C_Y}⚠${C_0} gates bind the roles below — not the agent's deployment"
+  else
+    title="shared-role stack"
+    warn="the agent deployment's gates [consume_role_arn]"
+  fi
+  echo "┌─ $stack — $title ───────────────────────────────────"
+  echo "│  $warn"
+  echo "│  status: $status    drift: $(drift_dot "$drift")"
+  echo "│  selling  $(gate_dot selling "$selling")   funding  $(gate_dot funding "$funding")"
+  echo "│  outbound $(gate_dot outbound "$outbound")   alliance $(gate_dot alliance "$alliance")"
+  echo "│  external-id: ${extid:+set}${extid:-none}    session-pin: ${sesspin:-false}"
+  [[ -n "$agents" ]] && { echo "│  principals:"; echo "$agents" | tr ',' '\n' | sed 's/^/│    /'; }
+  [[ -n "$auser" ]] && echo "│  AuthorizedUser: $auser"
+  [[ -n "$users" && "$users" != "None" ]] && echo "│  users: $(echo "$users" | tr ',' ' ')"
+  echo "└───────────────────────────────────────────────────────"
+}
+
+render_dashboard() {
+  local other="namazu-cosell-manager"
+  [[ "$STACK_NAME" == "namazu-cosell-manager" ]] && other="namazu-cosell-access"
+  local ta="/tmp/opencode/mas-card-a.$$.tmp" tb="/tmp/opencode/mas-card-b.$$.tmp"
+  render_card "$STACK_NAME" > "$ta" &
+  render_card "$other" > "$tb" &
+  wait
+  cat "$ta" "$tb"
+  rm -f "$ta" "$tb"
+}
+
+# ---- commands ----------------------------------------------------------------
+cmd_status() {
+  if [[ "$JSON" == 1 ]]; then
+    local fetched
+    fetched="$(fetch_stack_state "$STACK_NAME")"
+    if [[ "$fetched" == "MISSING" || -z "$fetched" ]]; then
+      echo "{\"stack\": \"$STACK_NAME\", \"missing\": true}"
+      return 0
+    fi
+    echo "{"
+    echo "  \"stack\": \"$STACK_NAME\","
+    echo "  \"status\": \"$(field_of "$fetched" "S:")\","
+    echo "  \"drift\": \"$(field_of "$fetched" "D:")\","
+    echo "  \"selling\": \"$(param_of "$fetched" CatalogPin)\","
+    echo "  \"funding\": \"$(param_of "$fetched" BenefitsCatalogPin)\","
+    echo "  \"outbound\": \"$(param_of "$fetched" EnableOutboundEngagement)\","
+    echo "  \"alliance\": \"$(param_of "$fetched" EnableAllianceConnections)\","
+    echo "  \"external_id\": \"$(param_of "$fetched" ExternalId)\","
+    echo "  \"session_pin\": \"$(param_of "$fetched" EnforceSessionName)\","
+    echo "  \"users\": \"$(param_of "$fetched" Users)\""
+    echo "}"
+    return 0
+  fi
+  render_dashboard
+}
+
+cmd_drift() {
+  local -a stacks=("$STACK_NAME")
+  local other="namazu-cosell-manager"
+  [[ "$STACK_NAME" == "namazu-cosell-manager" ]] && other="namazu-cosell-access"
+  stacks+=("$other")
+  local s id res
+  for s in ${stacks[@]+"${stacks[@]}"}; do
+    id="$(aws cloudformation detect-stack-drift --stack-name "$s" --query 'StackDriftDetectionId' --output text 2>/dev/null)"
+    if [[ -z "$id" || "$id" == "None" ]]; then echo "$s: detection failed"; continue; fi
+    printf '%s: detecting…' "$s"
+    for i in $(seq 1 20); do
+      sleep 5
+      res="$(aws cloudformation describe-stack-drift-detection-status --stack-drift-detection-id "$id" --query 'StackDriftDetectionStatus' --output text 2>/dev/null)"
+      case "$res" in DETECTION_COMPLETE|DETECTION_FAILED) break;; esac
+    done
+    printf '\r%s: ' "$s"
+    aws cloudformation describe-stack-resource-drifts --stack-name "$s" \
+      --query 'StackResourceDrifts[0].StackResourceDriftStatus' --output text 2>/dev/null || echo "n/a"
+  done
+  echo "(the dashboard shows drift from the last detection)"
+}
+
+cmd_set() {
+  local -a pairs=()
+  if [[ $# -ge 2 && "$1" != *=* ]]; then
+    pairs+=("$1=$2"); shift 2
+  fi
+  local a
+  for a in "$@"; do
+    [[ "$a" == "--yes" || "$a" == "--json" ]] && continue
+    [[ "$a" == *=* ]] || die "set: expected KEY=VALUE pairs (e.g. manage-access set selling=Both)"
+    pairs+=("$a")
+  done
+  [[ ${#pairs[@]} -ge 1 ]] || die "set: nothing to change (e.g. manage-access set selling=Sandbox)"
+
+  updatable_stack || return 1
+  local -a overrides=()
+  local pair key val pkey cur
+  local -a plan=()
+  for pair in ${pairs[@]+"${pairs[@]}"}; do
+    key="${pair%%=*}"; val="${pair#*=}"
+    pkey="$(gate_param "$key")"
+    [[ -n "$pkey" ]] || die "unknown gate: $key [known: selling funding outbound alliance external-id session-pin agents authorized-user]"
+    validate_gate "$key" "$val" || die "invalid value for $key: $val"
+    cur="$(snap_param "$pkey")"
+    case "$key" in
+      agents|authorized-user)
+        [[ -n "$cur" ]] || die "this stack's template doesn't carry $pkey" ;;
+    esac
+    overrides+=("$pkey=$val")
+    if [[ "$val" == "$cur" ]]; then
+      plan+=("  $(gate_label "$key"): $cur        [unchanged]")
+    else
+      plan+=("  $(gate_label "$key"): ${cur:-<unset>} -> $val")
+    fi
+  done
+
+  say "plan:"
+  local l changed=0
+  for l in ${plan[@]+"${plan[@]}"}; do
+    echo "  $l"
+    [[ "$l" == *"[unchanged]" ]] || changed=1
+  done
+  if [[ "$changed" == 0 ]]; then
+    say "nothing to change — done."
+    return 0
+  fi
+  say "users after this change: $(snap_users)"
+  if [[ "$YES" == 1 ]]; then
+    echo "--yes: applying without confirmation"
+  else
+    confirm "apply to $STACK_NAME?" || { echo "aborted"; return 0; }
+  fi
+  if deploy_with_overrides ${overrides[@]+"${overrides[@]}"} \
+     && snapshot_stack \
+     && [[ "$(snap_status)" == *_COMPLETE ]]; then
+    say "done. gates updated — IAM re-evaluates per request; the capability tags update with the policy, so the agent discovers the new envelope on its next session."
+  else
+    echo "deploy failed"; events_hint; return 1
+  fi
+}
+
+# ---- commands ---------------------------------------------------------------
+case "$COMMAND" in
+  "")         : ;;
+  status)     cmd_status; exit 0 ;;
+  drift)      cmd_drift; exit 0 ;;
+  set)        cmd_set "$@"; exit $? ;;
+  candidates) list_iam_candidates; exit 0 ;;
+  delete)     delete_stack; exit 0 ;;
+  help)       show_help; exit 0 ;;
+  menu)       : ;;
+  *)          die "unknown command: $COMMAND (commands: status set drift candidates delete menu help; or run with no command for the menu)" ;;
+esac
+
+interactive_menu() {
 choice=""
 while true; do
   echo
-  echo "Namazu co-selling agent — access manager"
-  status="$(stack_status)"
-  echo "  stack: $STACK_NAME (${status:-not created yet})"
+  echo "${C_B}Namazu co-selling agent — access manager${C_0}"
+  render_dashboard
   echo
   echo "  1) Create the access stack (first-time setup)."
   echo "  2) Add a user."
@@ -817,3 +1092,5 @@ while true; do
     *) echo "Invalid choice — please enter 1–9, 0, h, or q." ;;
   esac
 done
+}
+interactive_menu
