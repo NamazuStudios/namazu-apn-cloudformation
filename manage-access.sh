@@ -398,7 +398,7 @@ list_users() {
   alliance="$(snap_param EnableAllianceConnections)"
   extid="$(snap_param ExternalId)"
   sesspin="$(snap_param EnforceSessionName)"
-  say "IAM gates in force (change: options 6-9):"
+  say "IAM gates in force (change: options 6-9; trust wiring: 10):"
   say "  selling catalog:   ${catalog:-<unmanaged>}"
   say "  funding catalog:   ${bencatalog:-<no funding grant in this stack template>}"
   say "  outbound engagement [partner-initiated co-sell]: ${outbound:-<not a knob in this stack template>}"
@@ -537,46 +537,12 @@ change_funding_catalog() {
   change_pin BenefitsCatalogPin "funding catalog [partnercentral-benefits]" "Sandbox AWS Both"
 }
 
-# change_motions — toggle the co-sell motions. Both prompts default to
-# keep-current; the redeploy happens once, with every other parameter
-# preserved.
-change_motions() {
-  updatable_stack || return 1
-  local outbound alliance
-  outbound="$(snap_param EnableOutboundEngagement)"
-  alliance="$(snap_param EnableAllianceConnections)"
-  if [[ -z "$outbound" && -z "$alliance" ]]; then
-    say "this stack's template doesn't carry the motion toggles — redeploy with the current template first."
-    return 1
-  fi
-  say "current motions:"
-  say "  outbound engagement [partner-initiated co-sell]: $outbound"
-  say "  alliance connections [partner-to-partner]:       $alliance"
-  local o="" a=""
-  if [[ -n "$outbound" ]]; then
-    say "  outbound engagement: engagements + invitations to bring AWS sellers onto partner-originated opportunities, the engagement/opportunity task machinery, prospecting, and resource snapshots."
-    confirm "change outbound engagement? currently $outbound" && { read -r -p "new value true/false, blank keeps $outbound: " o || true; [[ "$o" == "true" || "$o" == "false" ]] || o=""; }
-  fi
-  if [[ -n "$alliance" ]]; then
-    say "  alliance connections: partner-to-partner connections and invitations, alliance-led co-sell, partner reads, alliance-lead contact."
-    confirm "change alliance connections? currently $alliance" && { read -r -p "new value true/false, blank keeps $alliance: " a || true; [[ "$a" == "true" || "$a" == "false" ]] || a=""; }
-  fi
-  if [[ -z "$o" && -z "$a" ]]; then
-    say "nothing to change"
-    return 0
-  fi
-  local -a overrides=()
-  [[ -n "$o" ]] && overrides+=("EnableOutboundEngagement=$o")
-  [[ -n "$a" ]] && overrides+=("EnableAllianceConnections=$a")
-  say "users after this change: $(snap_users)"
-  confirm "redeploy $STACK_NAME with the new motion set?" || { echo "aborted"; return 0; }
-  if deploy_with_overrides ${overrides[@]+"${overrides[@]}"} \
-     && snapshot_stack \
-     && [[ "$(snap_status)" == *_COMPLETE ]]; then
-    say "done. motions now: outbound=$(snap_param EnableOutboundEngagement) alliance=$(snap_param EnableAllianceConnections)"
-  else
-    echo "deploy failed"; events_hint; return 1
-  fi
+change_outbound_engagement() {
+  change_pin EnableOutboundEngagement "outbound engagement [partner-initiated co-sell]" "true false"
+}
+
+change_alliance_connections() {
+  change_pin EnableAllianceConnections "alliance connections [partner-to-partner]" "true false"
 }
 
 remove_user() {
@@ -754,21 +720,22 @@ THE MODEL
    Sandbox: enabling production selling never silently enables
    production funding. Same three-way choice, same enforcement.
 
-8) CHANGE THE CO-SELL MOTIONS
-   Two on/off toggles, defaulting to off (receive-only):
-     outbound engagement   engagements + engagement invitations to
-                           bring AWS sellers onto partner-originated
-                           opportunities, the engagement<->opportunity
-                           task machinery (including converting an
-                           accepted invitation into an opportunity),
-                           prospecting, and resource snapshots.
-     alliance connections  the Account API's partner-to-partner
-                           motions: connections + connection
-                           invitations (alliance-led co-sell),
-                           partner reads, alliance-lead contact.
-   Both prompts default to keep-current; one redeploy applies both.
+8) TOGGLE OUTBOUND ENGAGEMENT
+   on:  engagements + engagement invitations to bring AWS sellers
+        onto partner-originated opportunities, the
+        engagement<->opportunity task machinery (including
+        converting an accepted invitation into an opportunity),
+        prospecting, and resource snapshots.
+   off: the role stays receive-only. Default. Enforced by IAM
+        (explicit Deny on the outbound action set when off).
 
-9) EDIT THE TRUST WIRING
+9) TOGGLE ALLIANCE CONNECTIONS
+   on:  the Account API's partner-to-partner motions: connections
+        + connection invitations (alliance-led co-sell), partner
+        reads, alliance-lead contact.
+   off: default. Enforced by IAM the same way.
+
+10) EDIT THE TRUST WIRING
    The trust-side gates:
      agent role principals  (shared-role stacks) the IRSA roles
                             allowed to assume, one per agent
@@ -798,8 +765,8 @@ FIELD REFERENCE
                 agreement — misconfigured means every assume is denied.
   catalogs      'Sandbox', 'AWS', or 'Both' for each of selling and
                 funding (see options 6 and 7); enforced by IAM.
-  motions       'true'/'false' toggles for outbound engagement and
-                alliance connections (see option 8).
+  motions       'true'/'false' toggles for outbound engagement
+                (option 8) and alliance connections (option 9).
   principals    (shared-role stacks) comma-separated IRSA role ARNs
                 trusted to assume (see option 8).
   session pin   forces sessions to be named '<user>-session'; enable
@@ -826,8 +793,9 @@ while true; do
   echo "  5) Remove a user."
   echo "  6) Change the selling catalog (Sandbox / AWS / Both)."
   echo "  7) Change the funding catalog (Sandbox / AWS / Both)."
-  echo "  8) Change the co-sell motions (outbound engagement / alliance)."
-  echo "  9) Edit the trust wiring (principals, external ID, session pin)."
+  echo "  8) Toggle outbound engagement (partner-initiated co-sell)."
+  echo "  9) Toggle alliance connections (partner-to-partner)."
+  echo "  10) Edit the trust wiring (principals, external ID, session pin)."
   echo "  0) Delete the access stack entirely."
   echo "  h) Help — what each option does, step by step."
   echo "  q) Quit."
@@ -840,8 +808,9 @@ while true; do
     5) remove_user ;;
     6) change_selling_catalog ;;
     7) change_funding_catalog ;;
-    8) change_motions ;;
-    9) edit_trust_wiring ;;
+    8) change_outbound_engagement ;;
+    9) change_alliance_connections ;;
+    10) edit_trust_wiring ;;
     0) delete_stack ;;
     h|H) show_help ;;
     q|Q) exit 0 ;;
