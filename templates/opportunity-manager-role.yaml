@@ -233,6 +233,19 @@ Resources:
           Value: !Ref AuthorizedUser
         - Key: ManagedBy
           Value: !Ref ManagedByTag
+        # Capability tags — rendered from the SAME parameters that render
+        # the permission policy, so they can never disagree with it. The
+        # agent reads these (iam:GetRole on its own ARN — see the
+        # ReadOwnRoleMetadata statement) to discover what its deployment
+        # may do, instead of probing access and failing.
+        - Key: cosell:catalog-selling
+          Value: !Ref CatalogPin
+        - Key: cosell:catalog-funding
+          Value: !Ref BenefitsCatalogPin
+        - Key: cosell:motion-outbound
+          Value: !Ref EnableOutboundEngagement
+        - Key: cosell:motion-alliance
+          Value: !Ref EnableAllianceConnections
         - !If
           - HasWorkspaceIdTag
           - Key: cloud.namazustudios.com/workspace_id
@@ -326,6 +339,14 @@ Resources:
               # ephemeral write-only bucket (catalog-agnostic; the exact
               # bucket name from the live authz errors — the Developer
               # Guide's rendering drops a hyphen at a PDF line-wrap).
+              # Self-description: the role may read its OWN metadata and
+              # tags (nothing else) — the agent's capability discovery
+              # reads the cosell:* tags above. Scoped to this role's ARN.
+              - Sid: ReadOwnRoleMetadata
+                Effect: Allow
+                Action: ["iam:GetRole", "iam:ListRoleTags"]
+                Resource:
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:role/${RoleName}'
               - Sid: S3PutObjectAccess
                 Effect: Allow
                 Action: ["s3:PutObject"]

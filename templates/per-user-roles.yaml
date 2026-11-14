@@ -181,6 +181,17 @@ Resources:
               Value: !Ref User
             - Key: ManagedBy
               Value: namazu-apn-cloudformation
+            # Capability tags — the same parameters that render the
+            # permission policy (never disagree), read by the agent to
+            # self-discover what its deployment may do.
+            - Key: cosell:catalog-selling
+              Value: !Ref CatalogPin
+            - Key: cosell:catalog-funding
+              Value: !Ref BenefitsCatalogPin
+            - Key: cosell:motion-outbound
+              Value: !Ref EnableOutboundEngagement
+            - Key: cosell:motion-alliance
+              Value: !Ref EnableAllianceConnections
           Policies:
             - PolicyName: PartnerCentralOpportunityManagement
               PolicyDocument:
@@ -252,6 +263,15 @@ Resources:
                     Action: ["s3:PutObject"]
                     Resource:
                       - arn:aws:s3:::aws-partner-central-marketplace-ephemeral-writeonly-files/*
+                  # Self-description: the role may read its OWN metadata and
+                  # tags (nothing else) — the agent's capability discovery
+                  # reads the cosell:* tags above. Scoped to this role's own
+                  # ARN (<RoleNamePrefix>-<User>).
+                  - Sid: ReadOwnRoleMetadata
+                    Effect: Allow
+                    Action: ["iam:GetRole", "iam:ListRoleTags"]
+                    Resource:
+                      - !Sub 'arn:aws:iam::${AWS::AccountId}:role/${RoleNamePrefix}-${User}'
                   # Partner-initiated co-sell motions, gated by
                   # EnableOutboundEngagement (omitted when false).
                   - Sid: OutboundEngagementMotions
