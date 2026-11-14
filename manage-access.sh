@@ -139,6 +139,13 @@ trap 'cleanup_snapshot; exit 130' INT TERM
 snap_status() { cat "$SNAP_DIR/status" 2>/dev/null; }
 snap_users()  { cat "$SNAP_DIR/users"  2>/dev/null; }
 
+# True when the stack's template carries the parameter at all (its value
+# may still be empty — an empty AgentRoleArns is a real state, not an
+# unmanaged one).
+param_defined() { # $1 = key
+  awk -F'\t' -v k="$1" '$1 == k { found=1 } END { exit !found }' "$SNAP_DIR/params" 2>/dev/null
+}
+
 # One stack parameter from the current snapshot (empty when absent).
 snap_param() { # $1 = parameter key
   awk -F'\t' -v k="$1" '$1 == k { print $2 }' "$SNAP_DIR/params" 2>/dev/null
@@ -322,6 +329,25 @@ create_stack() {
     *) die "catalog must be Sandbox, AWS, or Both" ;;
   esac
   extra+=("CatalogPin=$v")
+  say "Namazu agent principals (optional):
+  the IAM roles in Namazu's hosting account that the agent's pods
+  assume from — one per agent workspace, named
+      arn:aws:iam::308044622771:role/cosell-runner-<workspace-id>
+  Your Namazu contact provides the exact ARNs. Setting them pins the
+  trust to exactly those roles (recommended — no account-root trust);
+  the per-person SourceIdentity conditions still apply to every
+  principal. Blank keeps the account-root trust."
+  v=""
+  read -r -p "agent role ARNs, comma-separated (blank: account-root trust): " v || true
+  if [[ -n "$v" ]]; then
+    local r
+    local -a arn_parts=()
+    IFS=',' read -ra arn_parts <<< "$v"
+    for r in ${arn_parts[@]+"${arn_parts[@]}"}; do
+      [[ "$r" =~ ^arn:aws:iam::[0-9]{12}:role/ ]] || die "not a role ARN: $r"
+    done
+    extra+=("AgentRoleArns=$v")
+  fi
   say "session-name pin (optional):
   when enabled, each role only accepts sessions named '<user>-session'
   (e.g. peter-session) — one more thing enforced and visible in
@@ -464,11 +490,14 @@ change_param_free() {
 # every other parameter.
 edit_trust_wiring() {
   updatable_stack || return 1
-  if [[ -n "$(snap_param AgentRoleArns)" ]]; then
-    say "agent role principals [AgentRoleArns] — the IRSA roles allowed to
-  assume this role, one per agent workspace; the sts:SourceIdentity
-  condition still applies to every one of them:"
-    snap_param AgentRoleArns | tr ',' '\n' | sed 's/^/    /'
+  if param_defined AgentRoleArns; then
+    say "agent role principals [AgentRoleArns] — the IRSA roles in Namazu's
+  hosting account [308044622771] allowed to assume this role, one per
+  agent workspace (arn:aws:iam::308044622771:role/cosell-runner-<workspace-id>);
+  the sts:SourceIdentity condition still applies to every one of them:"
+    cur_arns="$(snap_param AgentRoleArns)"
+    if [[ -n "$cur_arns" ]]; then snap_param AgentRoleArns | tr ',' '\n' | sed 's/^/    /'
+    else echo "    <empty — account-root trust>"; fi
     local v=""
     read -r -p "new comma-separated list (blank: keep current): " v || true
     if [[ -n "$v" ]]; then
