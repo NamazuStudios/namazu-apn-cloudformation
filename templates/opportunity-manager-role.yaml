@@ -7,8 +7,7 @@ Description: >
   accepts sessions presenting that exact sts:SourceIdentity — so every
   action the agent takes in your account is attributable to one named
   person in CloudTrail. Optional hardening: an ExternalId condition and a
-  per-user RoleSessionName pin. For multiple named users with strictly
-  separated roles, use per-user-roles.yaml instead.
+  per-user RoleSessionName pin.
 
 Parameters:
   RoleName:
@@ -33,15 +32,19 @@ Parameters:
     AllowedPattern: '^[0-9]{12}$'
   AuthorizedUser:
     Type: String
+    Default: ''
     Description: >
       The individual this role is attributed to (e.g. the account
-      manager). Two things must match this value: the sts:SourceIdentity
-      the agent presents when assuming the role, and this role's
-      AuthorizedUser tag (set automatically below). Every action lands in
-      CloudTrail under this identity. 2-64 characters (AWS requires
-      source identities to be at least 2), letters, digits, and
-      _+=,.@- only.
-    AllowedPattern: '^[A-Za-z0-9_+=,.@-]{2,64}$'
+      manager) — the sts:SourceIdentity every assuming session must
+      present, matched against this role's AuthorizedUser tag; every
+      action lands in CloudTrail under this identity. EMPTY is the
+      fail-closed start: attribution is an access decision made after
+      create (the manager script's `set authorized-user=…`), and the
+      trust's Allow branch requires BOTH this and the principals —
+      with either missing, the role authorizes nobody. 2-64 characters
+      (AWS requires source identities to be at least 2), letters,
+      digits, and _+=,.@- only, when set.
+    AllowedPattern: '^$|^[A-Za-z0-9_+=,.@-]{2,64}$'
   ExternalId:
     Type: String
     Description: >
@@ -166,6 +169,14 @@ Conditions:
   IsOutboundEngagement: !Equals [!Ref EnableOutboundEngagement, 'true']
   IsAllianceConnections: !Equals [!Ref EnableAllianceConnections, 'true']
   HasAgentRoleArns: !Not [!Equals [!Join ['', !Ref AgentRoleArns], '']]
+  HasAuthorizedUser: !Not [!Equals [!Ref AuthorizedUser, '']]
+  # Access needs BOTH halves: the principals (which runners may try)
+  # and the attribution (who the actions land on in CloudTrail). The
+  # trust's Allow branch exists only when both are decided — no window
+  # where runners are trusted but nobody is attributed.
+  HasAccessDecided: !And
+    - !Condition HasAgentRoleArns
+    - !Condition HasAuthorizedUser
   HasWorkspaceIdTag: !Not [!Equals [!Ref WorkspaceIdTag, '']]
   HasOrganizationIdTag: !Not [!Equals [!Ref OrganizationIdTag, '']]
   HasBillableTag: !Not [!Equals [!Ref BillableTag, '']]
@@ -182,15 +193,17 @@ Resources:
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
-          # The trust is the principal list, nothing else: AgentRoleArns
-          # set = exactly those runners may assume (with the SourceIdentity
-          # + ExternalId pins below). AgentRoleArns EMPTY = the role
-          # authorizes NOBODY — an explicit deny for every principal —
-          # until principals are added via the manager script (option 2).
-          # There is no account-root fallback: the empty state is
-          # fail-closed by construction.
+          # The trust is the principal list plus the attribution, nothing
+          # else: the Allow branch exists only when BOTH the principals
+          # (AgentRoleArns) and the authorized user are set — the assume
+          # then requires exactly those runners, the SourceIdentity, and
+          # the ExternalId. ANY missing piece — no principals, no
+          # authorized user — renders the explicit deny for every
+          # principal: the role authorizes NOBODY. There is no
+          # account-root fallback: the empty state is fail-closed by
+          # construction.
           - !If
-            - HasAgentRoleArns
+            - HasAccessDecided
             - Sid: CrossAccountIdentityEnforcement
               Effect: Allow
               Principal:
@@ -222,7 +235,7 @@ Resources:
                 - sts:SetSourceIdentity
       Tags:
         - Key: AuthorizedUser
-          Value: !Ref AuthorizedUser
+          Value: !If [HasAuthorizedUser, !Ref AuthorizedUser, 'attribution-pending']
         - Key: ManagedBy
           Value: !Ref ManagedByTag
         # Capability tags — rendered from the SAME parameters that render
@@ -426,8 +439,9 @@ Outputs:
   AuthorizedUser:
     Description: >
       The source identity this role is attributed to — becomes the
-      deployment's aws.sourceIdentity.
-    Value: !Ref AuthorizedUser
+      deployment's aws.sourceIdentity. '(unset)' until the operator
+      sets it (the trust stays deny-all until then).
+    Value: !If [HasAuthorizedUser, !Ref AuthorizedUser, '(unset)']
   TemplateVersion:
     Description: Template revision for support reference.
     Value: '1.0.0'

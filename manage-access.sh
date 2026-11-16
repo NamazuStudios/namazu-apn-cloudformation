@@ -1,38 +1,34 @@
 #!/usr/bin/env bash
 # manage-access.sh — interactive manager for the Namazu co-selling
 # agent's customer-side access. THE MODEL: one CloudFormation stack, one
-# IAM role. Create (option 1) deploys templates/opportunity-manager-role.yaml
-# with the trust authorizing NOBODY (an explicit deny for every
-# principal); access is then purely the principal list — the agents'
-# per-workspace runner roles — added and removed by options 2 and 4.
-# Delete the stack and the role goes with it. Gate flips (options 5-8)
-# and the on-demand ticket report (option 9) round it out.
-#
-# The per-user template (templates/per-user-roles.yaml — one role per
-# person) is a direct-deploy variant for accounts that want per-person
-# attribution; see README.md. This script manages an existing per-user
-# stack passed via --stack-name (its shape is detected from the stack's
-# own parameters) — add/remove principals and gate flips apply to it
-# the same way.
+# IAM role. Create (option 1) is ONE SHOT: it needs nothing but the
+# external ID (generated unless --external-id) and deploys the role with
+# its trust authorizing NOBODY (an explicit deny for every principal).
+# Access is then exactly two decisions, wired after create: the
+# authorized user (set authorized-user=… — the attribution) and the
+# principals (options 2/4 — the agents' per-workspace runner roles,
+# constructed from <user_name>=<workspace-id> pairs). The trust's Allow
+# branch exists only when BOTH are set. Delete the stack and the role
+# goes with it. Gate flips (options 5-8) and the on-demand ticket
+# report (option 9) round it out.
 #
 # Requirements: bash + the AWS CLI, authenticated as a principal allowed
 # to create IAM roles in the AWS account linked to your Partner Central
 # account. No other dependencies (no jq — parsing is done with --query).
 #
 # Usage: ./manage-access.sh [--stack-name NAME] [--region REGION]
+#                        [--external-id VALUE]
 #
 # Copyright 2026 Namazu Studios LLC. Licensed AGPL-3.0 — see LICENSE.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# CREATE deploys the shared-role model: one role, its trust a plain
-# principal list (empty = an explicit deny for everyone — nobody
-# authorized) that options 2/4 add to and remove from. The per-user
-# template (one role per person) is deployed directly — see README —
-# and this script still manages an existing per-user stack passed via
-# --stack-name (the shape is detected from the stack's parameters).
+# ONE template, ONE model: a stack, a role, a principal list. Create
+# (option 1) is one shot — it needs nothing but the ExternalId (generated
+# unless --external-id) and deploys the role with its trust authorizing
+# NOBODY. Access is then exactly two decisions, wired after create: the
+# authorized user (set authorized-user=…) and the principals (options 2/4).
 TEMPLATE="$SCRIPT_DIR/templates/opportunity-manager-role.yaml"
-TEMPLATE_PERUSER="$SCRIPT_DIR/templates/per-user-roles.yaml"
 STACK_NAME="namazu-cosell-manager"
 
 EXTID_RE='^[A-Za-z0-9_+=,.@-]{2,1224}$'
@@ -87,6 +83,9 @@ Usage: ./manage-access.sh [--stack-name NAME] [--region REGION]
                  (default: namazu-cosell-manager — the shared-role stack)
   --region       AWS region for the CloudFormation calls
                  (default: your AWS CLI's configured region)
+  --external-id  supply the external ID instead of generating one
+                 (the one-shot create generates a random 32-char secret
+                 unless this is given)
 
 Menu: create the access stack (the role exists; its trust authorizes
 nobody), add/remove the principals that may assume it (the agents'
@@ -96,19 +95,19 @@ delete the stack (the role goes with it). `ticket` reprints the full
 report on demand; in the menu, 'h' shows a detailed help.
 
 Requires: bash, the AWS CLI, and credentials for the AWS account linked
-to your Partner Central account. Creates from
-templates/opportunity-manager-role.yaml (the shared-role model); an
-existing per-user stack deployed from templates/per-user-roles.yaml
-(see README) can be managed by passing --stack-name.
+to your Partner Central account. Deploys
+templates/opportunity-manager-role.yaml — the only template: one role,
+one principal list.
 EOF
 }
 
 # ---- flags ------------------------------------------------------------------
-YES=0; JSON=0
+YES=0; JSON=0; EXTERNAL_ID=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --stack-name) [[ $# -ge 2 ]] || die "--stack-name needs a value"; STACK_NAME="$2"; shift 2 ;;
     --region)     [[ $# -ge 2 ]] || die "--region needs a value"; AWS_DEFAULT_REGION="$2"; export AWS_DEFAULT_REGION; shift 2 ;;
+    --external-id) [[ $# -ge 2 ]] || die "--external-id needs a value"; EXTERNAL_ID="$2"; shift 2 ;;
     --yes)        YES=1; shift ;;
     --json)       JSON=1; shift ;;
     -h|--help)    usage; exit 0 ;;
@@ -140,9 +139,6 @@ snapshot_stack() {
     || die "cannot create a temp dir"
   aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
     --query 'Stacks[0].StackStatus' --output text 2>/dev/null >"$SNAP_DIR/status" &
-  aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
-    --query "Stacks[0].Parameters[?ParameterKey=='Users'].ParameterValue | [0]" \
-    --output text 2>/dev/null >"$SNAP_DIR/users" &
   # (The JMESPath literal backticks below are intentional — no shell expansion.)
   # shellcheck disable=SC2016
   aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
@@ -161,7 +157,6 @@ trap cleanup_snapshot EXIT
 trap 'cleanup_snapshot; exit 130' INT TERM
 
 snap_status() { cat "$SNAP_DIR/status" 2>/dev/null; }
-snap_users()  { cat "$SNAP_DIR/users"  2>/dev/null; }
 
 # True when the stack's template carries the parameter at all (its value
 # may still be empty — an empty AgentRoleArns is a real state, not an
@@ -181,18 +176,6 @@ snap_param() { # $1 = parameter key
 # caller asks for. Without this, adding a second user (or changing the
 # catalog) would silently wipe a CatalogPin or ExternalId set at creation
 # time.
-# The template an UPDATE should deploy: the stack's own parameters say
-# which shape it is (a Users parameter = the per-user model; anything
-# else = the shared-role model). Create always deploys the shared model.
-current_template() {
-  [[ -n "$SNAP_DIR" ]] || snapshot_stack
-  if param_defined "Users"; then
-    echo "$TEMPLATE_PERUSER"
-  else
-    echo "$TEMPLATE"
-  fi
-}
-
 deploy_with_overrides() { # $@ = KEY=VALUE pairs to substitute into the snapshot
   [[ -n "$SNAP_DIR" ]] || snapshot_stack
   local -A ov=()
@@ -208,7 +191,7 @@ deploy_with_overrides() { # $@ = KEY=VALUE pairs to substitute into the snapshot
     overrides+=("$k=$v")
   done < "$SNAP_DIR/params"
   aws cloudformation deploy \
-    --template-file "$(current_template)" \
+    --template-file "$TEMPLATE" \
     --stack-name "$STACK_NAME" \
     --capabilities CAPABILITY_NAMED_IAM \
     --parameter-overrides ${overrides[@]+"${overrides[@]}"}
@@ -216,20 +199,6 @@ deploy_with_overrides() { # $@ = KEY=VALUE pairs to substitute into the snapshot
 
 events_hint() {
   echo "  for the reason: aws cloudformation describe-stack-events --stack-name $STACK_NAME --region <your-region>"
-}
-
-# RoleArn outputs from the current snapshot, tab-separated (one line per user).
-print_role_arns() { # $@ = users to report (empty = all)
-  [[ -n "$SNAP_DIR" ]] || snapshot_stack
-  local want="${*:-}"
-  local key arn user
-  while IFS=$'\t' read -r key arn; do
-    [[ -n "$key" ]] || continue
-    user="${key#RoleArn}"
-    if [[ -z "$want" || " $want " == *" $user "* ]]; then
-      echo "  $user -> $arn"
-    fi
-  done < "$SNAP_DIR/arns"
 }
 
 # ---- ticket report -----------------------------------------------------------
@@ -241,10 +210,9 @@ print_role_arns() { # $@ = users to report (empty = all)
 # Printed after create and add-user, and on demand (menu option 9 /
 # `ticket`), so the ticket a customer sends is never assembled by hand.
 
-# One RoleArn output by user name. The shared-role stack has a single
-# output keyed plain "RoleArn" — pass an empty user for that one.
-ticket_role_arn() { # $1 = user ("" = the shared-role output)
-  awk -F'\t' -v k="RoleArn$1" '$1 == k { print $2; exit }' "$SNAP_DIR/arns" 2>/dev/null
+# The stack's single RoleArn output.
+ticket_role_arn() {
+  awk -F'\t' -v k="RoleArn" '$1 == k { print $2; exit }' "$SNAP_DIR/arns" 2>/dev/null
 }
 
 # One contract-entry block — the five agent_apn fields this stack
@@ -272,7 +240,7 @@ runner_user_name() { # $1 = runner role ARN; echoes "user workspace" or nothing
 
 print_ticket_report() {
   snapshot_stack
-  local status extid agents auser users
+  local status extid agents auser
   status="$(snap_status)"
   if [[ -z "$status" ]]; then
     echo "no stack $STACK_NAME — nothing to report (option 1 creates it)"
@@ -281,8 +249,7 @@ print_ticket_report() {
   extid="$(snap_param ExternalId)"
   agents="$(snap_param AgentRoleArns)"
   auser="$(snap_param AuthorizedUser)"
-  users="$(snap_users)"
-  local bar u a uw rarn g
+  local bar a uw rarn g
   bar="$(printf '%0.s─' $(seq 1 64))"
 
   say "$bar"
@@ -341,61 +308,34 @@ print_ticket_report() {
   fi
 
   echo
-  echo "ROLES (what the agent assumes — each becomes a consume_role_arn):"
-  if [[ -n "$users" && "$users" != "None" ]]; then
-    while IFS= read -r u; do
-      [[ -n "$u" ]] || continue
-      echo "  $u -> $(ticket_role_arn "$u")"
-      echo "      assume must present: SourceIdentity \"$u\" + the external ID"
-    done < <(tr ',' '\n' <<< "$users")
+  echo "ROLE (what the agent assumes — becomes the consume_role_arn):"
+  echo "  $(ticket_role_arn)"
+  if [[ -n "$auser" && "$auser" != "None" ]]; then
+    echo "      assume must present: SourceIdentity \"$auser\" + the external ID"
   else
-    echo "  shared role -> $(ticket_role_arn "")"
-    echo "      assume must present: SourceIdentity \"${auser:-<confirm with Namazu>}\" + the external ID"
+    echo "      authorized user UNSET — set it (set authorized-user=NAME)
+      before sending; the trust stays deny-all until it and a
+      principal both exist"
   fi
 
   echo
   echo "CONTRACT ENTRIES (merge verbatim into the workspace agent_apn block)"
   echo
   local -a entries=()
-  if [[ -n "$users" && "$users" != "None" ]]; then
-    # Per-user stack: one entry per user; the runner principal that serves
-    # them is the one whose user_name matches (role names are unique
-    # case-insensitively, so the match is folded).
-    local match_a match_u
-    while IFS= read -r u; do
-      [[ -n "$u" ]] || continue
-      rarn="$(ticket_role_arn "$u")"
-      match_a=""; match_u=""
-      if [[ -n "$agents" ]]; then
-        while IFS= read -r a; do
-          uw="$(runner_user_name "$a")"
-          if [[ -n "$uw" ]] && [[ "$(lower "${uw%% *}")" == "$(lower "$u")" ]]; then
-            match_a="$a"; match_u="${uw%% *}"; break
-          fi
-        done < <(tr ',' '\n' <<< "$agents")
-      fi
-      if [[ -n "$match_a" ]]; then
-        entries+=("$(ticket_entry "user $u — runner ${match_a##*/}" "$rarn" "$match_u" "$u")")
+  # One role, one AuthorizedUser — an entry per runner principal, each
+  # pairing the role with that workspace. No principals yet = no entries:
+  # the note below says so.
+  rarn="$(ticket_role_arn)"
+  if [[ -n "$agents" ]]; then
+    while IFS= read -r a; do
+      [[ -n "$a" ]] || continue
+      uw="$(runner_user_name "$a")"
+      if [[ -n "$uw" ]]; then
+        entries+=("$(ticket_entry "workspace ${uw##* } — runner ${a##*/}" "$rarn" "${uw%% *}" "$auser")")
       else
-        entries+=("$(ticket_entry "user $u (no matching runner principal in AgentRoleArns)" "$rarn" "" "$u")")
+        entries+=("$(ticket_entry "runner ${a##*/} (confirm the workspace with Namazu)" "$rarn" "" "$auser")")
       fi
-    done < <(tr ',' '\n' <<< "$users")
-  else
-    # Shared-role stack: one role, one AuthorizedUser — an entry per runner
-    # principal, each pairing the shared role with that workspace. No
-    # principals yet = no entries: the note below says so.
-    rarn="$(ticket_role_arn "")"
-    if [[ -n "$agents" ]]; then
-      while IFS= read -r a; do
-        [[ -n "$a" ]] || continue
-        uw="$(runner_user_name "$a")"
-        if [[ -n "$uw" ]]; then
-          entries+=("$(ticket_entry "workspace ${uw##* } — runner ${a##*/}" "$rarn" "${uw%% *}" "$auser")")
-        else
-          entries+=("$(ticket_entry "runner ${a##*/} (confirm the workspace with Namazu)" "$rarn" "" "$auser")")
-        fi
-      done < <(tr ',' '\n' <<< "$agents")
-    fi
+    done < <(tr ',' '\n' <<< "$agents")
   fi
   if [[ ${#entries[@]} -eq 0 ]]; then
     echo "  (no contract entries yet — nothing to wire until principals"
@@ -411,7 +351,8 @@ print_ticket_report() {
   g="$(snap_param EnableOutboundEngagement)"; echo "  outbound engagement:  ${g:-<not a knob in this template>}"
   g="$(snap_param EnableAllianceConnections)";echo "  alliance connections: ${g:-<not a knob in this template>}"
   echo
-  echo "session-name pin: $(snap_param EnforceSessionName)"
+  local spin; spin="$(snap_param EnforceSessionName)"
+  echo "session-name pin: ${spin:-false}"
   echo "$bar"
 }
 
@@ -420,10 +361,6 @@ confirm() { # $1 = question; returns 0 on yes
   read -r -p "$1 [y/N]: " reply || true
   [[ "$reply" == "y" || "$reply" == "Y" || "$reply" == "yes" ]]
 }
-
-# Case-folded form of a name — IAM role names are not case-sensitive for
-# uniqueness, so duplicate detection compares folded.
-lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
 # True when the stack exists and is not mid-operation; prints the reason
 # and returns 1 when an add/remove can't proceed. Takes the snapshot the
@@ -515,6 +452,16 @@ parse_principal_pairs() { # $1 = prompt input, $2 = existing ARNs
 # redeploy.
 add_principals() {
   updatable_stack || return 1
+  local auser
+  auser="$(snap_param AuthorizedUser)"
+  if [[ -z "$auser" || "$auser" == "None" ]]; then
+    say "the authorized user is not set yet — the trust's Allow branch
+  needs BOTH it and the principals, and until the attribution exists,
+  adding principals changes nothing (CloudFormation renders the exact
+  same deny-all trust, so it will not even record the update).
+  set it first:   ./manage-access.sh set authorized-user=NAME"
+    return 1
+  fi
   local existing joined input
   existing="$(current_principals | paste -sd, -)"
   say "current principals:"
@@ -608,7 +555,7 @@ echo "aws account: $account   region: $region"
 # ---- actions ----------------------------------------------------------------
 # Option 1 — first-time setup (also the recreate path for a failed create).
 create_stack() {
-  local extra=() overrides=() v u status=""
+  local overrides=() extid status=""
   snapshot_stack
   status="$(snap_status)"
   if [[ -n "$status" ]]; then
@@ -629,78 +576,27 @@ create_stack() {
     fi
   fi
 
-  # The single decision this stack is attributed to: the person the
-  # agent sessions act as. Everything else access-related — WHO may
-  # assume — is the principal list, which starts EMPTY (the role's
-  # trust denies everyone) and is managed after create (option 2).
-  say "authorized user (the person this role is attributed to):
-  the sts:SourceIdentity every agent session must present, and what
-  CloudTrail shows for every action this role takes. Pick the human
-  (a personal username, not a group or shared account). rules: 2-64
-  characters; letters, digits, and _+=,.@- only."
-  v=""
-  read -r -p "authorized user (e.g. the account manager): " v || true
-  [[ -n "$v" ]] || die "authorized user cannot be empty"
-  [[ "$v" =~ ^[A-Za-z0-9_+=,.@-]{2,64}$ ]] \
-    || die "invalid authorized user (2-64 characters; letters/digits/_+=,.@- only)"
-  extra+=("AuthorizedUser=$v")
+  # ONE SHOT: the stack + the empty role, nothing else asked. The
+  # external ID is the one required decision — generated unless
+  # --external-id supplied it — and everything else takes its
+  # fail-safe template default (Sandbox catalog, no session pin, no
+  # authorized user, no principals). The two access decisions (the
+  # authorized user and the principals) are wired AFTER create.
+  local extid
+  extid="${EXTERNAL_ID:-$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)}"
+  [[ "$extid" =~ $EXTID_RE ]] || die "invalid --external-id (at least 2 characters; letters/digits/_+=,.@- only)"
 
-  # First create: offer the hardening/pinning parameters with sensible
-  # defaults (later updates preserve whatever is chosen here).
-  say "external ID (required — confused-deputy protection):
-  a secret the Namazu agent must present when assuming this role.
-  Generated by default (cryptographically random — recommended); or
-  enter your own. Either way it must be shared with your Namazu
-  contact (a support ticket works) so it lands in the deployment
-  contract — both sides must match, or every assume-role is denied.
-  rules: 2+ characters; letters, digits, and _+=,.@- only."
-  v=""
-  read -r -p "external ID — [g]enerate a random one, [e]nter your own, [Enter]=generate: " v || true
-  case "$v" in
-    ""|g|G)
-      v="$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)"
-      say "generated external ID: $v"
-      say "share this with your Namazu contact — it must be wired into the
-  deployment contract exactly as-is." ;;
-    e|E)
-      read -r -p "external ID value: " v || true
-      [[ -n "$v" ]] || die "external ID cannot be empty" ;;
-    *) die "external ID: answer g, e, or press Enter to generate" ;;
-  esac
-  [[ "$v" =~ $EXTID_RE ]] || die "invalid external ID (at least 2 characters; letters/digits/_+=,.@- only)"
-  extra+=("ExternalId=$v")
-  say "catalog:
-  Partner Central has two catalogs: 'Sandbox' (AWS's isolated test
-  catalog — placeholder data, safe to exercise against) and 'AWS'
-  (production — real opportunities and engagement invitations). The
-  choice is enforced by IAM: the role gets a condition limiting it to
-  the chosen catalog. 'Both' grants both catalogs — only for moving to
-  production co-sell work. There is no unpinned option: an operator
-  always chooses. default: Sandbox."
-  v=""
-  read -r -p "catalog — Sandbox, AWS, or Both (Sandbox): " v || true
-  v="${v:-Sandbox}"
-  case "$v" in
-    Sandbox|AWS|Both) ;;
-    *) die "catalog must be Sandbox, AWS, or Both" ;;
-  esac
-  extra+=("CatalogPin=$v")
-  say "session-name pin (optional):
-  when enabled, the role only accepts sessions named
-  '<authorized-user>-session' — one more thing enforced and visible in
-  CloudTrail, but the agent deployment must use exactly that name.
-  Enable only if your Namazu contact confirms their deployments set it."
-  v=""
-  read -r -p "enforce session names? (blank: no): " v || true
-  [[ "$v" == "y" || "$v" == "yes" ]] && extra+=("EnforceSessionName=true")
+  say "one-shot create:
+  stack:      $STACK_NAME
+  role:       exists immediately, trust = explicit deny (nobody authorized)
+  external ID: $extid  (generated${EXTERNAL_ID:+, from --external-id})
+  catalog:    Sandbox (the fail-safe default; flip with options 5/6)
+  after create: set the authorized user (set authorized-user=NAME) and
+                add principals (option 2) — access exists only when both
+                are set."
+  confirm "create it?" || { echo "aborted"; return 0; }
 
-  say "the stack creates the role with its trust authorizing NOBODY —
-  an explicit deny for every principal. Principals (the agents'
-  runner roles) are added after, with menu option 2."
-  confirm "create stack $STACK_NAME?" || { echo "aborted"; return 0; }
-
-  overrides=()
-  for u in ${extra[@]+"${extra[@]}"}; do overrides+=("$u"); done
+  overrides=("ExternalId=$extid")
   aws cloudformation deploy \
     --template-file "$TEMPLATE" \
     --stack-name "$STACK_NAME" \
@@ -715,7 +611,7 @@ create_stack() {
 
 list_state() {
   snapshot_stack
-  local status users
+  local status auser
   status="$(snap_status)"
   [[ -n "$status" ]] || { echo "no stack $STACK_NAME yet — nothing to list (option 1 creates it)"; return 0; }
   echo "stack: $STACK_NAME ($status)"
@@ -726,14 +622,13 @@ list_state() {
   alliance="$(snap_param EnableAllianceConnections)"
   extid="$(snap_param ExternalId)"
   sesspin="$(snap_param EnforceSessionName)"
-  users="$(snap_users)"
-  if [[ -n "$users" && "$users" != "None" ]]; then
-    say "shape: per-user stack — one role per person:"
-    print_role_arns
+  auser="$(snap_param AuthorizedUser)"
+  say "role:"
+  echo "  ARN: $(ticket_role_arn)"
+  if [[ -n "$auser" && "$auser" != "None" ]]; then
+    echo "  authorized user: $auser"
   else
-    say "shape: shared-role stack — one role:"
-    echo "  authorized user: $(snap_param AuthorizedUser)"
-    echo "  role ARN: $(ticket_role_arn "")"
+    echo "  authorized user: <unset — set with: ./manage-access.sh set authorized-user=NAME>"
   fi
   say "principals (the only thing that may assume; change: options 2/4):"
   list_principals
@@ -767,7 +662,6 @@ change_pin() {
   done
   [[ "$ok" == 1 ]] || die "value must be one of: $choices"
   [[ "$v" == "$cur" ]] && { say "already $v — nothing to do"; return 0; }
-  say "users after this change: $(snap_users)"
   confirm "redeploy $STACK_NAME with $key=$v?" || { echo "aborted"; return 0; }
   if deploy_with_overrides "$key=$v" \
      && snapshot_stack \
@@ -827,19 +721,18 @@ THE MODEL
   account-root trust anywhere: the empty state is fail-closed by
   construction.
 
-1) CREATE THE ACCESS STACK
+1) CREATE THE ACCESS STACK (one shot)
    step 1  make sure you are authenticated to the AWS account linked
            to your Partner Central account (shown in the header).
-   step 2  the authorized user — the person the role is attributed to;
-           the sts:SourceIdentity every agent session must present and
-           what CloudTrail shows (a personal username, not a group).
-   step 3  the external ID (required; generated by default or enter
-           your own) and the catalog pin; optionally the session-name
-           pin. Asked only here; later edits preserve them.
-   step 4  confirm — the stack deploys the role with its trust
-           authorizing nobody, and prints a TICKET REPORT: everything
-           to hand to your Namazu contact.
+   step 2  confirm. The external ID is generated (or pass
+           --external-id up front); the catalog defaults to Sandbox;
+           the authorized user and the principals are NOT asked — the
+           stack and the empty role exist the moment this finishes,
+           with the trust an explicit deny for every principal.
+   step 3  the script prints the ticket report: hand the external ID
+           and the role ARN to your Namazu contact when ready.
 
+2) ADD PRINCIPALS
 2) ADD PRINCIPALS
    step 1  give <user_name>=<workspace-id> pairs, comma-separated
            (see FIELD REFERENCE). The script constructs each runner
@@ -850,9 +743,9 @@ THE MODEL
            (with the SourceIdentity + external ID).
 
 3) LIST THE STATE
-   The stack status, the shape (shared role or per-user roles), the
-   role ARN(s), the principal list (or the nobody-authorized state),
-   the catalog pins, the motion toggles, and the external ID /
+   The stack status, the role ARN, the authorized user (or the unset
+   state), the principal list (or the nobody-authorized state), the
+   catalog pins, the motion toggles, and the external ID /
    session-pin state. Read-only.
 
 4) REMOVE A PRINCIPAL
@@ -907,8 +800,9 @@ THE MODEL
 FIELD REFERENCE
   authorized   2-64 characters, letters/digits/_+=,.@-; the person the
   user         role is attributed to — the role's AuthorizedUser tag
-               and the sts:SourceIdentity the agent must present.
-               Asked once, at create.
+               and the sts:SourceIdentity the agent must present. NOT
+               asked at create: set it after (set authorized-user=NAME);
+               the trust's Allow branch needs it AND a principal.
   principal    <user_name>=<workspace-id> — the pair that names one
   pair         runner role: arn:aws:iam::308044622771:role/
                cosell-agent-<user_name>-<workspace-id>. The user_name
@@ -935,12 +829,11 @@ FIELD REFERENCE
                names.
 
 CLI FLAGS
-  --stack-name  manage a different stack (default namazu-cosell-manager).
-                 An existing per-user stack (one role per person,
-                 deployed directly from templates/per-user-roles.yaml —
-                 see README) can be passed here: the script detects the
-                 shape from the stack itself, and options 2-9 manage it
-                 the same way.
+  --stack-name    manage a different stack (default
+                  namazu-cosell-manager) — e.g. separate stacks per
+                  environment.
+  --external-id   supply the external ID at the one-shot create
+                  instead of generating one.
   --region      region for the AWS calls (default: your CLI config)
 EOF
 }
@@ -948,20 +841,24 @@ EOF
 # ---- gate registry -----------------------------------------------------------
 gate_param() {
   case "$1" in
-    selling)        echo "CatalogPin" ;;
-    funding)        echo "BenefitsCatalogPin" ;;
-    outbound)       echo "EnableOutboundEngagement" ;;
-    alliance)       echo "EnableAllianceConnections" ;;
+    selling)         echo "CatalogPin" ;;
+    funding)         echo "BenefitsCatalogPin" ;;
+    outbound)        echo "EnableOutboundEngagement" ;;
+    alliance)        echo "EnableAllianceConnections" ;;
+    session-pin)     echo "EnforceSessionName" ;;
+    authorized-user) echo "AuthorizedUser" ;;
     *) echo "" ;;
   esac
 }
 
 gate_label() {
   case "$1" in
-    selling)        echo "selling catalog" ;;
-    funding)        echo "funding catalog" ;;
-    outbound)       echo "outbound engagement [partner-initiated co-sell]" ;;
-    alliance)       echo "alliance connections [partner-to-partner]" ;;
+    selling)         echo "selling catalog" ;;
+    funding)         echo "funding catalog" ;;
+    outbound)        echo "outbound engagement [partner-initiated co-sell]" ;;
+    alliance)        echo "alliance connections [partner-to-partner]" ;;
+    session-pin)     echo "session-name pin" ;;
+    authorized-user) echo "authorized user [SourceIdentity attribution]" ;;
     *) echo "$1" ;;
   esac
 }
@@ -973,6 +870,8 @@ validate_gate() {
       case "$val" in Sandbox|AWS|Both) return 0 ;; esac ;;
     outbound|alliance|session-pin)
       case "$val" in true|false) return 0 ;; esac ;;
+    authorized-user)
+      [[ "$val" =~ ^[A-Za-z0-9_+=,.@-]{2,64}$ ]] && return 0 ;;
   esac
   return 1
 }
@@ -1028,7 +927,7 @@ render_card_from() { # $1 = state file, $2 = stack name
   local stack="$2" fetched
   fetched="$(cat "$1")"
   if [[ -z "$fetched" ]]; then return 1; fi
-  local status drift selling funding outbound alliance extid sesspin users agents auser title warn
+  local status drift selling funding outbound alliance extid sesspin agents auser
   status="$(field_of "$fetched" "S:")"
   drift="$(field_of "$fetched" "D:")"
   selling="$(param_of "$fetched" CatalogPin)"
@@ -1037,25 +936,17 @@ render_card_from() { # $1 = state file, $2 = stack name
   alliance="$(param_of "$fetched" EnableAllianceConnections)"
   extid="$(param_of "$fetched" ExternalId)"
   sesspin="$(param_of "$fetched" EnforceSessionName)"
-  users="$(param_of "$fetched" Users)"
   agents="$(param_of "$fetched" AgentRoleArns)"
   auser="$(param_of "$fetched" AuthorizedUser)"
-  if [[ -n "$users" && "$users" != "None" ]]; then
-    title="per-user stack"
-    warn="${C_Y}⚠${C_0} gates bind the roles below — not the agent's deployment"
-  else
-    title="shared-role stack"
-    warn="the agent deployment's gates [consume_role_arn]"
-  fi
-  echo "┌─ $stack — $title ───────────────────────────────────"
-  echo "│  $warn"
+  echo "┌─ $stack — the agent deployment's gates [consume_role_arn] ──"
   echo "│  status: $status    drift: $(drift_dot "$drift")"
   echo "│  selling  $(gate_dot selling "$selling")   funding  $(gate_dot funding "$funding")"
   echo "│  outbound $(gate_dot outbound "$outbound")   alliance $(gate_dot alliance "$alliance")"
   echo "│  external-id: ${extid:+set}${extid:-none}    session-pin: ${sesspin:-false}"
+  [[ -n "$auser" ]] && echo "│  authorized user: $auser"
+  [[ -z "$auser" ]] && echo "│  ${C_Y}authorized user UNSET — trust is deny-all${C_0}"
   [[ -n "$agents" ]] && { echo "│  principals:"; echo "$agents" | tr ',' '\n' | sed 's/^/│    /'; }
-  [[ -n "$auser" ]] && echo "│  AuthorizedUser: $auser"
-  [[ -n "$users" && "$users" != "None" ]] && echo "│  users: $(echo "$users" | tr ',' ' ')"
+  [[ -z "$agents" ]] && echo "│  ${C_Y}principals: NONE — trust is deny-all${C_0}"
   echo "└───────────────────────────────────────────────────────"
 }
 
@@ -1091,7 +982,8 @@ cmd_status() {
     echo "  \"alliance\": \"$(param_of "$fetched" EnableAllianceConnections)\","
     echo "  \"external_id\": \"$(param_of "$fetched" ExternalId)\","
     echo "  \"session_pin\": \"$(param_of "$fetched" EnforceSessionName)\","
-    echo "  \"users\": \"$(param_of "$fetched" Users)\""
+    echo "  \"authorized_user\": \"$(param_of "$fetched" AuthorizedUser)\","
+    echo "  \"principals\": \"$(param_of "$fetched" AgentRoleArns)\""
     echo "}"
     return 0
   fi
@@ -1132,7 +1024,7 @@ cmd_set() {
   for pair in ${pairs[@]+"${pairs[@]}"}; do
     key="${pair%%=*}"; val="${pair#*=}"
     pkey="$(gate_param "$key")"
-    [[ -n "$pkey" ]] || die "unknown gate: $key [known: selling funding outbound alliance]"
+    [[ -n "$pkey" ]] || die "unknown gate: $key [known: selling funding outbound alliance session-pin authorized-user]"
     validate_gate "$key" "$val" || die "invalid value for $key: $val"
     cur="$(snap_param "$pkey")"
     overrides+=("$pkey=$val")
@@ -1153,7 +1045,6 @@ cmd_set() {
     say "nothing to change — done."
     return 0
   fi
-  say "users after this change: $(snap_users)"
   if [[ "$YES" == 1 ]]; then
     echo "--yes: applying without confirmation"
   else

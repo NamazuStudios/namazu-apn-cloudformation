@@ -90,28 +90,10 @@ person (e.g. your account manager) is the co-selling contact.
 | `ResourceScope` | no | Narrows the permission policy's `Resource` (default `*`) |
 | `CatalogPin` | no | Pins the role to one Partner Central catalog (`Sandbox` for trials, `AWS` for production) |
 
-### `templates/per-user-roles.yaml` — strict-accountability variant
 
-One `Namazu-CoSell-Opportunity-Manager-<user>` role **per named user** from the
-`Users` list (a comma-delimited list, e.g. `"peter,maria"`). Same trust
-and permission shape as above, per person — use this when several people
-work co-selling and you want each one's access to be an independent,
-separately revocable role.
-
-| Parameter | Required | What it does |
-|---|---|---|
-| `Users` | yes | The individuals to create roles for — each becomes its own role, its `AuthorizedUser` tag, and its source identity (2–30 characters at the default prefix) |
-| `RoleNamePrefix` | no | The prefix of the per-user role names (default `Namazu-CoSell-Opportunity-Manager`, yielding `…-Manager-<user>`). The prefix is fixed for the same reasons as the shared template's `RoleName` — identifiability, and the Namazu side gates its assumes to that namespace — but a hyphenated suffix is allowed (e.g. `…-Manager-Prod` yields `…-Manager-Prod-<user>` roles) |
-| `NamazuAccountId` | no | The Namazu hosting account to trust (default: Namazu Studios' production account — your contact will confirm) |
-| `ExternalId` | no | Adds an `sts:ExternalId` condition to every role if you want extra confused-deputy protection |
-| `EnforceSessionName` | no | Pins each role's assume-role session name to `<user>-session` |
-| `ResourceScope` | no | Narrows the permission policy's `Resource` (default `*`) |
-| `CatalogPin` | no | Pins every role to one Partner Central catalog (`Sandbox` for trials, `AWS` for production) |
-
-The `examples/` directory carries the plain policy JSON these templates
-embed (the trust policy, the permission policy, and the per-user policy
-shape) if you want to review the exact IAM documents or recreate them by
-hand.
+The `examples/` directory carries the plain policy JSON the template
+embeds (the trust policy and the permission policy) if you want to
+review the exact IAM documents or recreate them by hand.
 
 ## Quick start: the interactive manager
 
@@ -149,12 +131,8 @@ entries rendered in the exact shape the Namazu deployment takes
 `catalog`), and the capability gates in force. After a gate flip, the
 report shows the live gates.
 
-The script creates from `templates/opportunity-manager-role.yaml` (the
-shared-role model). The per-user variant (one role per person) is a
-direct deploy from `templates/per-user-roles.yaml` — the flow follows —
-and an existing per-user stack can still be managed by this script:
-pass `--stack-name` and the script detects the shape from the stack
-itself.
+The script deploys `templates/opportunity-manager-role.yaml` — the
+only template: one role, one principal list.
 
 ## Using a template
 
