@@ -48,15 +48,22 @@ Parameters:
     Default: '{"Version":"2012-10-17","Statement":[{"Sid":"NobodyAuthorizedYet","Effect":"Deny","Principal":{"AWS":"*"},"Action":["sts:AssumeRole","sts:SetSourceIdentity"]}]}'
     Description: >
       The complete trust policy JSON, composed from Users by the
-      interactive script: one Allow statement per user — Principal is
+      interactive script: TWO Allow statements per user — Principal is
       their runner role (arn:aws:iam::<namazu-account>:role/
       cosell-agent-<identifier>-<workspace>, to be provisioned by
-      Namazu Studios), the Condition requires their identifier as the
-      sts:SourceIdentity plus this stack's ExternalId (and the
+      Namazu Studios). Statement one is sts:AssumeRole carrying the
+      ExternalId + SourceIdentity conditions (plus the
       '<identifier>-session' RoleSessionName pin when EnforceSessionName
-      is on). The default is the fail-closed deny-all for an empty user
-      list. The script writes this together with Users on every
-      add/remove; hand-editing is not expected.
+      is on); statement two is sts:SetSourceIdentity carrying ONLY the
+      SourceIdentity condition — WHY SPLIT: the AssumeRole API
+      internally evaluates AssumeRole and (when a SourceIdentity is
+      passed) the permission-only sts:SetSourceIdentity, and the
+      supported condition keys differ between them; an ExternalId
+      condition on the combined statement makes every assume fail with
+      "not authorized to perform: sts:SetSourceIdentity". The default is
+      the fail-closed deny-all for an empty user list. The script writes
+      this together with Users on every add/remove; hand-editing is not
+      expected.
   ExternalId:
     Type: String
     Description: >

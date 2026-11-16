@@ -443,11 +443,17 @@ list_users_entries() {
   [[ "$n" -eq 0 ]] && echo "  (none — the trust denies everyone; option 2 adds users)"
 }
 
-# The complete trust policy JSON for a user list: one Allow statement
-# per user (their runner as Principal; their identifier as the
-# sts:SourceIdentity; the stack's ExternalId; the '<identifier>-session'
-# RoleSessionName pin when $2 is true). Empty list renders the
-# fail-closed deny-all.
+# The complete trust policy JSON for a user list: TWO Allow statements
+# per user — (1) sts:AssumeRole carrying the ExternalId + SourceIdentity
+# (+ RoleSessionName pin) conditions, (2) sts:SetSourceIdentity carrying
+# ONLY the SourceIdentity condition. WHY SPLIT: the AssumeRole API
+# internally evaluates AssumeRole and — when a SourceIdentity is passed —
+# the permission-only sts:SetSourceIdentity, and THE SUPPORTED CONDITION
+# KEYS DIFFER between them (sts:ExternalId is not a key of the
+# SetSourceIdentity evaluation): combining both actions in one statement
+# with an ExternalId condition makes every assume fail with "not
+# authorized to perform: sts:SetSourceIdentity" (proven live). Empty
+# list renders the fail-closed deny-all.
 compose_trust() { # $1 = comma-joined entries, $2 = EnforceSessionName true/false
   local joined="${1:-}" pin="${2:-false}" stmts="" first=1 e id ws arn cond stmt
   [[ "$joined" == "None" ]] && joined=""
@@ -459,12 +465,15 @@ compose_trust() { # $1 = comma-joined entries, $2 = EnforceSessionName true/fals
     [[ -n "$e" ]] || continue
     IFS='|' read -r id ws <<< "$e"
     arn="$(runner_arn_of "$id" "$ws")"
+    local p_arn="\"Principal\":{\"AWS\":\"${arn}\"}"
     cond="{\"sts:SourceIdentity\":\"${id}\",\"sts:ExternalId\":\"$(snap_param ExternalId)\""
     [[ "$pin" == "true" ]] && cond="${cond},\"sts:RoleSessionName\":\"${id}-session\""
     cond="${cond}}"
-    stmt="{\"Effect\":\"Allow\",\"Principal\":{\"AWS\":\"${arn}\"},\"Action\":[\"sts:AssumeRole\",\"sts:SetSourceIdentity\"],\"Condition\":{\"StringEquals\":${cond}}}"
+    stmt="{\"Effect\":\"Allow\",${p_arn},\"Action\":[\"sts:AssumeRole\"],\"Condition\":{\"StringEquals\":${cond}}}"
     [[ $first -eq 1 ]] && stmts="$stmt" || stmts="${stmts},${stmt}"
     first=0
+    stmt="{\"Effect\":\"Allow\",${p_arn},\"Action\":[\"sts:SetSourceIdentity\"],\"Condition\":{\"StringEquals\":{\"sts:SourceIdentity\":\"${id}\"}}}"
+    stmts="${stmts},${stmt}"
   done < <(tr ',' '\n' <<< "$joined")
   echo "{\"Version\":\"2012-10-17\",\"Statement\":[${stmts}]}"
 }
@@ -529,7 +538,34 @@ stage_param() { # $1 = KEY=VALUE
 # a full summary of what will be applied.
 apply_pending() {
   local n; n="$(pending_count)"
-  if [[ "$n" -eq 0 ]]; then say "nothing staged — menu actions (2/4/5-8) stage changes; 'w' writes them."; return 0; fi
+  if [[ "$n" -eq 0 ]]; then
+    # Drift-heal: nothing staged, but the stack's TrustPolicy may have
+    # been composed by an OLDER script version (e.g. the combined-
+    # statement shape that broke SetSourceIdentity). Offer the re-write.
+    updatable_stack || return 1
+    local expected live
+    expected="$(compose_trust "$(snap_param Users)" "$(snap_param EnforceSessionName)")"
+    live="$(snap_param TrustPolicy)"
+    if [[ -n "$live" && "$live" != "$expected" ]]; then
+      say "nothing staged, BUT the stack's trust policy was composed by an
+  older script version (the combined AssumeRole+SetSourceIdentity
+  statement shape that makes every assume fail). Re-writing it in the
+  current shape — same users, same gates, one update."
+      confirm "re-write the trust policy?" || { echo "aborted"; return 0; }
+      if deploy_with_overrides \
+         && snapshot_stack \
+         && [[ "$(snap_status)" == *_COMPLETE ]] \
+         && [[ "$(snap_status)" != *ROLLBACK* ]]; then
+        say "done — the trust policy is in the current shape. The agents
+  can assume again (their next session picks it up)."
+      else
+        echo "deploy failed"; events_hint; return 1
+      fi
+    else
+      say "nothing staged — menu actions (2/4/5-8) stage changes; 'w' writes them."
+    fi
+    return 0
+  fi
   updatable_stack || return 1
   local users_touched=0
   [[ ${#PENDING_ADD[@]} -gt 0 || ${#PENDING_REMOVE[@]} -gt 0 ]] && users_touched=1
