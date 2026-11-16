@@ -1,13 +1,15 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  Namazu co-selling agent access (default model): one shared
-  Namazu-CoSell-Opportunity-Manager IAM role in this account that the Namazu
-  co-selling agent assumes cross-account. Accountability is enforced per
-  user: the role carries an AuthorizedUser tag, and the trust policy only
-  accepts sessions presenting that exact sts:SourceIdentity — so every
-  action the agent takes in your account is attributable to one named
-  person in CloudTrail. Optional hardening: an ExternalId condition and a
-  per-user RoleSessionName pin.
+  Namazu co-selling agent access: ONE role — the well-known
+  Namazu-CoSell-Opportunity-Manager — in this account, created and
+  destroyed by this stack. It may be assumed by ZERO OR MORE principals
+  from Namazu's account: one per user, each entry pairing the runner
+  role Namazu's terraform creates for their workspace
+  (cosell-agent-<identifier>-<workspace>) with THEIR external user id as
+  the sts:SourceIdentity — so every action lands in CloudTrail
+  attributable to that one person. Zero users = the trust is an explicit
+  deny for every principal. The interactive manager (manage-access.sh)
+  composes the trust from the user list; hand-editing is not expected.
 
 Parameters:
   RoleName:
@@ -22,47 +24,56 @@ Parameters:
       existing role or your conventions call for one (e.g.
       Namazu-CoSell-Opportunity-Manager-Prod). 64 characters total.
     AllowedPattern: '^Namazu-CoSell-Opportunity-Manager(-[A-Za-z0-9_+=,.@-]{1,30})?$'
-  NamazuAccountId:
-    Type: String
-    Default: '308044622771'
-    Description: >
-      The AWS account ID of the Namazu hosting account to trust (the
-      principal the agent assumes from). Your Namazu contact will confirm
-      it; the default is Namazu Studios' production account.
-    AllowedPattern: '^[0-9]{12}$'
-  AuthorizedUser:
-    Type: String
+  Users:
+    Type: CommaDelimitedList
     Default: ''
     Description: >
-      The individual this role is attributed to (e.g. the account
-      manager) — the sts:SourceIdentity every assuming session must
-      present, matched against this role's AuthorizedUser tag; every
-      action lands in CloudTrail under this identity. EMPTY is the
-      fail-closed start: attribution is an access decision made after
-      create (the manager script's `set authorized-user=…`), and the
-      trust's Allow branch requires BOTH this and the principals —
-      with either missing, the role authorizes nobody. 2-64 characters
-      (AWS requires source identities to be at least 2), letters,
-      digits, and _+=,.@- only, when set.
-    AllowedPattern: '^$|^[A-Za-z0-9_+=,.@-]{2,64}$'
+      The users who may operate the agent — zero or more entries, each
+      <identifier>|<workspace-id>|<external-user-id>:
+      identifier — a short descriptive label that gets baked into the
+      runner role's name in Namazu's account (cosell-agent-<identifier>-
+      <workspace>, created by Namazu's terraform — the principal this
+      role trusts for that user);
+      workspace-id — the 24-hex id of their workspace in Namazu Cloud;
+      external-user-id — the sts:SourceIdentity their sessions must
+      present: the id both sides attribute that user's actions to
+      (defined by the operator of the script, 2-64 characters, letters/
+      digits/_+=,.@- only).
+      Managed by the interactive script (options 2/4), which composes
+      TrustPolicy from this list. Empty = nobody authorized.
+  TrustPolicy:
+    Type: String
+    Default: '{"Version":"2012-10-17","Statement":[{"Sid":"NobodyAuthorizedYet","Effect":"Deny","Principal":{"AWS":"*"},"Action":["sts:AssumeRole","sts:SetSourceIdentity"]}]}'
+    Description: >
+      The complete trust policy JSON, composed from Users by the
+      interactive script: one Allow statement per user — Principal is
+      their runner role (arn:aws:iam::<namazu-account>:role/
+      cosell-agent-<identifier>-<workspace>, created by Namazu's
+      terraform), the Condition requires their external-user-id as the
+      sts:SourceIdentity plus this stack's ExternalId (and the
+      '<external-user-id>-session' RoleSessionName pin when
+      EnforceSessionName is on). The default is the fail-closed
+      deny-all for an empty user list. The script writes this together
+      with Users on every add/remove; hand-editing is not expected.
   ExternalId:
     Type: String
     Description: >
-      Optional external ID for additional confused-deputy protection. When
-      set, the trust policy additionally requires sts:ExternalId to match
-      and the agent must be configured with the same value. At least 2
-      characters when set (AWS requirement). Leave empty to rely on the
-      SourceIdentity enforcement alone.
-    AllowedPattern: '^$|^[A-Za-z0-9_+=,.@-]{2,1224}$'
+      REQUIRED external ID — confused-deputy protection: every assume
+      must additionally present this secret, and the agent deployment
+      must be configured with the same value. Generated by the manager
+      script at create unless you supply one. At least 2 characters
+      (AWS requirement); letters, digits, and _+=,.@- only.
+    AllowedPattern: '^[A-Za-z0-9_+=,.@-]{2,1224}$'
   EnforceSessionName:
     Type: String
     Default: 'false'
     AllowedValues: ['true', 'false']
     Description: >
-      When true, the trust policy additionally pins the assume-role
-      session name to '<AuthorizedUser>-session' (the strict-accountability
-      convention). The agent deployment must then use the matching session
-      name. Leave false unless asked.
+      When true, each user's trust statement additionally pins the
+      assume-role session name to '<external-user-id>-session'. The
+      agent deployment must then use the matching session name per
+      user. Leave false unless asked. (The script folds this into the
+      composed TrustPolicy.)
   ResourceScope:
     Type: String
     Default: '*'
@@ -115,21 +126,6 @@ Parameters:
       connection invitations (alliance-led co-sell with other partners),
       partner reads, and alliance-lead contact management. Default
       false — alliance programs are a distinct AWS program lane.
-  AgentRoleArns:
-    Type: CommaDelimitedList
-    Default: ''
-    Description: >
-      The exact IAM role ARNs allowed to assume this role — the Namazu
-      agent's dedicated runner roles, one per workspace, named
-      deterministically
-      (arn:aws:iam::<account>:role/cosell-agent-<user_name>-<workspace>),
-      so the interactive manager constructs them from the
-      <user_name>=<workspace-id> pairs you enter (option 2 adds or
-      removes them). EMPTY is the fail-closed start: the role exists but
-      its trust is an explicit deny for every principal — nobody may
-      assume it until principals are added. There is no account-root
-      fallback. The sts:SourceIdentity condition still applies to every
-      principal.
   ManagedByTag:
     Type: String
     Default: 'namazu-apn-cloudformation'
@@ -163,20 +159,10 @@ Parameters:
       omits the tag.
 
 Conditions:
-  HasSessionNamePin: !Equals [!Ref EnforceSessionName, 'true']
   IsCatalogBoth: !Equals [!Ref CatalogPin, 'Both']
   IsBenefitsCatalogBoth: !Equals [!Ref BenefitsCatalogPin, 'Both']
   IsOutboundEngagement: !Equals [!Ref EnableOutboundEngagement, 'true']
   IsAllianceConnections: !Equals [!Ref EnableAllianceConnections, 'true']
-  HasAgentRoleArns: !Not [!Equals [!Join ['', !Ref AgentRoleArns], '']]
-  HasAuthorizedUser: !Not [!Equals [!Ref AuthorizedUser, '']]
-  # Access needs BOTH halves: the principals (which runners may try)
-  # and the attribution (who the actions land on in CloudTrail). The
-  # trust's Allow branch exists only when both are decided — no window
-  # where runners are trusted but nobody is attributed.
-  HasAccessDecided: !And
-    - !Condition HasAgentRoleArns
-    - !Condition HasAuthorizedUser
   HasWorkspaceIdTag: !Not [!Equals [!Ref WorkspaceIdTag, '']]
   HasOrganizationIdTag: !Not [!Equals [!Ref OrganizationIdTag, '']]
   HasBillableTag: !Not [!Equals [!Ref BillableTag, '']]
@@ -187,55 +173,15 @@ Resources:
     Properties:
       RoleName: !Ref RoleName
       Description: >-
-        Assumed cross-account by the Namazu co-selling agent (with the
-        AuthorizedUser source identity) to manage Partner Central
-        co-selling opportunities. Created by namazu-apn-cloudformation.
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          # The trust is the principal list plus the attribution, nothing
-          # else: the Allow branch exists only when BOTH the principals
-          # (AgentRoleArns) and the authorized user are set — the assume
-          # then requires exactly those runners, the SourceIdentity, and
-          # the ExternalId. ANY missing piece — no principals, no
-          # authorized user — renders the explicit deny for every
-          # principal: the role authorizes NOBODY. There is no
-          # account-root fallback: the empty state is fail-closed by
-          # construction.
-          - !If
-            - HasAccessDecided
-            - Sid: CrossAccountIdentityEnforcement
-              Effect: Allow
-              Principal:
-                AWS: !Ref AgentRoleArns
-              Action:
-                - sts:AssumeRole
-                - sts:SetSourceIdentity
-              Condition:
-                # The assuming session must present this exact source
-                # identity; it must equal the AuthorizedUser tag below —
-                # that match is what makes every action attributable. The
-                # optional RoleSessionName pin folds in via Fn::If (a
-                # Condition map can't carry two Fn::If keys).
-                Fn::If:
-                  - HasSessionNamePin
-                  - StringEquals:
-                      sts:SourceIdentity: !Ref AuthorizedUser
-                      sts:ExternalId: !Ref ExternalId
-                      sts:RoleSessionName: !Sub '${AuthorizedUser}-session'
-                  - StringEquals:
-                      sts:SourceIdentity: !Ref AuthorizedUser
-                      sts:ExternalId: !Ref ExternalId
-            - Sid: NobodyAuthorizedYet
-              Effect: Deny
-              Principal:
-                AWS: "*"
-              Action:
-                - sts:AssumeRole
-                - sts:SetSourceIdentity
+        Assumed by the Namazu co-selling agent's per-workspace runner
+        roles (one per user, with that user's source identity) to manage
+        Partner Central co-selling opportunities. Created and destroyed
+        by this stack (namazu-apn-cloudformation).
+      # The trust is composed by the interactive script from the Users
+      # list — one Allow statement per user; the deny-all default when
+      # the list is empty. See the TrustPolicy parameter.
+      AssumeRolePolicyDocument: !Ref TrustPolicy
       Tags:
-        - Key: AuthorizedUser
-          Value: !If [HasAuthorizedUser, !Ref AuthorizedUser, 'attribution-pending']
         - Key: ManagedBy
           Value: !Ref ManagedByTag
         # Capability tags — rendered from the SAME parameters that render
@@ -431,17 +377,12 @@ Resources:
 Outputs:
   RoleArn:
     Description: >
-      The role the Namazu co-selling agent assumes. Give this to your
-      Namazu contact (along with the ExternalId) — it becomes the
-      deployment's aws.roleArn. The role exists from create; until
-      principals are added (AgentRoleArns), its trust authorizes nobody.
+      The role the Namazu co-selling agent assumes — the well-known
+      name, created and destroyed by this stack. Hand it to your Namazu
+      contact (along with the ExternalId and the user list) — it becomes
+      the deployment's consume_role_arn. With no users, its trust
+      authorizes nobody.
     Value: !GetAtt OpportunityManagerRole.Arn
-  AuthorizedUser:
-    Description: >
-      The source identity this role is attributed to — becomes the
-      deployment's aws.sourceIdentity. '(unset)' until the operator
-      sets it (the trust stays deny-all until then).
-    Value: !If [HasAuthorizedUser, !Ref AuthorizedUser, '(unset)']
   TemplateVersion:
     Description: Template revision for support reference.
     Value: '1.0.0'

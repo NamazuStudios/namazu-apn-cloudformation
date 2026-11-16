@@ -46,24 +46,22 @@ account, 308044622771) assume roles in YOUR account — cross-account, with
 no credentials ever shared:
 
 1. You created your workspace(s) in Namazu Cloud — you know their ids.
-   Each workspace's agent runs under a dedicated runner role named
-   `arn:aws:iam::308044622771:role/cosell-agent-<user_name>-<workspace-id>`
-   — and because the naming is deterministic, the interactive manager
-   CONSTRUCTS the ARNs from what you enter at its add-principals prompt
-   (option 2, `<user_name>=<workspace-id>` pairs): you pick the
-   user_name (anything IAM-compliant, up to 20 characters — match your
-   own company username convention), the workspace id is the 24-hex id
-   Namazu Cloud shows for your instance. No ARNs need to be handed to
-   you first.
-2. You create the stack in YOUR account (option 1): the role exists
-   immediately, and until principals are added its trust is an explicit
-   deny — nobody may assume. Adding the principals (option 2) pins the
-   trust to: exactly those runners, your person's `sts:SourceIdentity`
-   (matched against the `AuthorizedUser` tag), your chosen catalogs, and
-   your chosen action set. Removing one (option 4) drops it instantly.
-3. You send the ticket report the script prints (the external ID + the
-   role ARN + the principals' entries). Namazu points the relevant
-   agent deployment at the role.
+   Each workspace's agent runs under a dedicated runner role created by
+   Namazu's terraform, named deterministically
+   `arn:aws:iam::308044622771:role/cosell-agent-<identifier>-<workspace-id>`
+   — so the interactive manager CONSTRUCTS the principal from what you
+   enter; you never paste an ARN.
+2. You create the stack in YOUR account (option 1, one shot): the role
+   exists immediately with its trust an explicit deny — nobody may
+   assume. Adding a user (option 2) specifies the four facts —
+   identifier (baked into the runner role's name), workspace id, the
+   external user id (their `sts:SourceIdentity`, the id both sides
+   attribute their actions to), and thereby the expected principal —
+   and the script composes one Allow statement per user into the role's
+   trust. Removing a user (option 4) drops their statement instantly.
+3. You send the ticket report the script prints after adding: the exact
+   configuration Namazu needs — the external ID, the role ARN, and one
+   agent_apn entry per user (workspace, identifier, source identity).
 
 From then on, every action the agent takes in your account is that
 assumed role in your CloudTrail, attributed to the named person, scoped
@@ -97,20 +95,24 @@ review the exact IAM documents or recreate them by hand.
 
 ## Quick start: the interactive manager
 
-`manage-access.sh` manages the model end to end: **one stack, one IAM
-role, access = the principal list.** Option 1 creates the stack and the
-role with its trust authorizing **nobody** (an explicit deny for every
-principal — the fail-closed start; there is no account-root trust
-anywhere). Options 2 and 4 add and remove principals — the Namazu
-agents' per-workspace runner roles, constructed for you from
-`<user_name>=<workspace-id>` pairs, so you never paste an ARN. Options
-5-8 flip the capability gates, option 9 prints the ticket report, and
-option 0 deletes the stack — **the role goes with it** (no retain: all
-access stops immediately). The menu's help option (`h`) walks through
-every task step by step with a field reference:
+`manage-access.sh` manages the model end to end: **one stack, one
+well-known role, access = the user list.** Option 1 is a ONE-SHOT
+create: it asks nothing but the confirm (the external ID is generated,
+or supply it with `--external-id`; the catalog defaults to Sandbox) and
+deploys the role with its trust authorizing **nobody** — an explicit
+deny for every principal; there is no account-root trust anywhere.
+Options 2 and 4 add and remove users — each entry
+`<identifier>|<workspace-id>|<external-user-id>` becomes one Allow
+statement in the trust: the runner role Namazu's terraform created for
+that workspace (constructed — you never paste an ARN), presenting that
+user's `sts:SourceIdentity`. Options 5-8 flip the capability gates,
+option 9 prints the ticket report, and option 0 deletes the stack —
+**the role goes with it** (no retain: all access stops immediately).
+The menu's help option (`h`) walks through every task step by step
+with a field reference:
 
 ```bash
-./manage-access.sh                      # menu: create / add principals / list / remove / gates / report / delete
+./manage-access.sh                      # menu: create / add users / list / remove / gates / report / delete
 ./manage-access.sh --region us-east-1   # or --stack-name to manage another stack
 ```
 
@@ -121,12 +123,12 @@ stack parameter on each update, so settings chosen at creation (the
 external ID, the catalog pin, the session-name pin) survive every add,
 remove, and gate flip.
 
-The **ticket report** (printed after create, and on demand via option 9
-/ `./manage-access.sh ticket`) is everything to hand to your Namazu
-contact in one block: the external ID, the role ARN with the
-SourceIdentity it requires, the trusted principals and the Namazu Cloud
-workspaces they serve (or the nobody-authorized state), the contract
-entries rendered in the exact shape the Namazu deployment takes
+The **ticket report** (printed after create and after every add, and
+on demand via option 9 / `./manage-access.sh ticket`) is the exact
+configuration Namazu needs: the external ID, the role ARN, the users
+(workspace, identifier, source identity — or the nobody-authorized
+state), and one contract entry per user in the exact shape the Namazu
+deployment takes
 (`consume_role_arn`, `user_name`, `source_identity`, `external_id`,
 `catalog`), and the capability gates in force. After a gate flip, the
 report shows the live gates.
