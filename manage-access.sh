@@ -315,7 +315,7 @@ create_stack() {
   fi
   say "catalog:
   Partner Central has two catalogs: 'Sandbox' (AWS's isolated test
-  catalog — placeholder data, safe to trial against) and 'AWS'
+  catalog — placeholder data, safe to exercise against) and 'AWS'
   (production — real opportunities and engagement invitations). The
   choice is enforced by IAM: every role in this stack gets a condition
   limiting it to the chosen catalog. 'Both' grants both catalogs —
@@ -742,7 +742,7 @@ THE MODEL
 
 6) CHANGE THE SELLING CATALOG
    partnercentral-selling — opportunities, invitations, solutions.
-   Enforced by IAM on every role in the stack ('Sandbox' trial /
+   Enforced by IAM on every role in the stack ('Sandbox' for sandbox
    'AWS' production / 'Both'; there is no unpinned option: an
    operator always chooses). Every other parameter is preserved;
    update the agent-side catalog hint to match (the IAM condition

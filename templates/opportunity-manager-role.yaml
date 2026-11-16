@@ -76,7 +76,7 @@ Parameters:
     Description: >
       Which Partner Central catalog the agent may operate in, enforced by
       IAM via the partnercentral:Catalog condition key: 'Sandbox' (AWS's
-      isolated test catalog — placeholder data, safe to trial against),
+      isolated test catalog — placeholder data, safe to exercise against),
       'AWS' (the production catalog — real opportunities and engagement
       invitations), or 'Both' (grants both — use only when moving to
       production co-sell work; there is no unpinned/implicit option: an
@@ -118,7 +118,7 @@ Parameters:
     Default: ''
     Description: >
       Optional: exact IAM role ARNs allowed to assume this role. When
-      Namazu's agent runs INSIDE this account (the internal-trial case —
+      Namazu's agent runs INSIDE this account (the same-account case —
       its pod identity is a per-workspace IRSA role here), list those
       roles so the trust no longer relies on the account-root principal:
       e.g.
@@ -190,7 +190,7 @@ Resources:
           - Sid: CrossAccountIdentityEnforcement
             Effect: Allow
             Principal:
-              # Internal-trial mode (AgentRoleArns set): trust exactly the
+              # Same-account mode (AgentRoleArns set): trust exactly the
               # agent pods' IRSA roles — the agent runs in this account,
               # and a root-principal trust would let any principal in it
               # present the source identity. Customer mode (default): the

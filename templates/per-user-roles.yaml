@@ -83,7 +83,7 @@ Parameters:
       Which Partner Central catalog every role in this stack may operate
       in, enforced by IAM via the partnercentral:Catalog condition key:
       'Sandbox' (AWS's isolated test catalog — placeholder data, safe to
-      trial against), 'AWS' (the production catalog — real opportunities
+      sandbox work), 'AWS' (the production catalog — real opportunities
       and engagement invitations), or 'Both' (grants both — use only when
       moving to production co-sell work; there is no unpinned/implicit
       option: an operator always chooses). The agent-side catalog hint
@@ -162,7 +162,7 @@ Resources:
                 Effect: Allow
                 Principal:
                   # AgentRoleArns set: exact runner principals (the
-                  # internal-trial case); empty: the account root, as the
+                  # same-account case); empty: the account root, as the
                   # cross-account customer case expects.
                   AWS: !If
                     - HasAgentRoleArns
