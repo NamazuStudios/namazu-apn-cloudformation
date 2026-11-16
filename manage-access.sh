@@ -23,7 +23,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATE="$SCRIPT_DIR/templates/per-user-roles.yaml"
-STACK_NAME="namazu-cosell-access"
+STACK_NAME="namazu-cosell-manager"
 NEW_USERS=() # filled by read_users_input, consumed by create_stack/add_users
 
 # IAM role-name rules as the template enforces them (also validated
@@ -64,7 +64,7 @@ manage-access.sh — manage Namazu co-selling agent access (interactive)
 Usage: ./manage-access.sh [--stack-name NAME] [--region REGION]
 
   --stack-name   the CloudFormation stack to manage
-                 (default: namazu-cosell-access)
+                 (default: namazu-cosell-manager — the shared-role stack)
   --region       AWS region for the CloudFormation calls
                  (default: your AWS CLI's configured region)
 
@@ -807,7 +807,7 @@ FIELD REFERENCE
                 only if the Namazu side configures session names.
 
 CLI FLAGS
-  --stack-name  manage a different stack (default namazu-cosell-access)
+  --stack-name  manage a different stack (default namazu-cosell-manager)
   --region      region for the AWS calls (default: your CLI config)
 EOF
 }
