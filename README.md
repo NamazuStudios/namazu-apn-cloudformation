@@ -38,6 +38,30 @@ The end customer accounts on your opportunities are never accessed — an
 opportunity record *mentions* a customer's AWS account ID; the agent has
 no permissions that could reach it.
 
+## Cross-account: letting the Namazu agent work in your account
+
+The sections above describe the trust model inside one account. The same
+templates also let the Namazu co-selling agent (running in Namazu's hosting
+account, 308044622771) assume roles in YOUR account — cross-account, with
+no credentials ever shared:
+
+1. Your Namazu contact gives you the agent's runner role ARNs — one per
+   agent workspace, named
+   `arn:aws:iam::308044622771:role/cosell-runner-<workspace-id>`
+   (the `AgentRoleArns` prompt in the interactive manager takes them).
+2. You run this stack in YOUR account with those ARNs as `AgentRoleArns`.
+   The trust then pins your role to: exactly those principals, your
+   person's `sts:SourceIdentity` (matched against the `AuthorizedUser`
+   tag), your chosen catalogs, and your chosen action set.
+3. You hand back the created role ARN (the script prints them). Namazu
+   points the relevant agent deployment at it.
+
+From then on, every action the agent takes in your account is that
+assumed role in your CloudTrail, attributed to the named person, scoped
+to the catalogs and actions your stack granted — and revocable by
+deleting the stack or the user. Nothing in your account is reachable
+except through that one assumed role.
+
 ## Templates
 
 ### `templates/opportunity-manager-role.yaml` — default model
