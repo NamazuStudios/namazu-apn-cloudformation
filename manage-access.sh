@@ -429,7 +429,7 @@ list_users() {
   alliance="$(snap_param EnableAllianceConnections)"
   extid="$(snap_param ExternalId)"
   sesspin="$(snap_param EnforceSessionName)"
-  say "IAM gates in force (change: options 6-9; trust wiring: 10):"
+  say "IAM gates in force (change: options 5-8):"
   say "  selling catalog:   ${catalog:-<unmanaged>}"
   say "  funding catalog:   ${bencatalog:-<no funding grant in this stack template>}"
   say "  outbound engagement [partner-initiated co-sell]: ${outbound:-<not a knob in this stack template>}"
@@ -448,83 +448,6 @@ list_users() {
   fi
   say "current users and their role ARNs:"
   print_role_arns
-}
-
-# change_param_free — like change_pin but for free-text parameters
-# validated by an AllowedPattern instead of a fixed choice list.
-change_param_free() {
-  updatable_stack || return 1
-  local key="$1" label="$2" pattern="$3" hint="$4"
-  local cur
-  cur="$(snap_param "$key")"
-  if [[ -z "$cur" ]]; then
-    say "this stack's template doesn't carry $key — redeploy with the current template first."
-    return 1
-  fi
-  say "current $label: $cur"
-  say "  $hint"
-  confirm "change it?" || { echo "aborted"; return 0; }
-  local v=""
-  read -r -p "new value (blank keeps current): " v || true
-  [[ -z "$v" ]] && { say "kept current"; return 0; }
-  [[ "$v" =~ $pattern ]] || die "value does not match the required pattern"
-  [[ "$v" == "$cur" ]] && { say "already set — nothing to do"; return 0; }
-  say "users after this change: $(snap_users)"
-  confirm "redeploy $STACK_NAME with the new $key?" || { echo "aborted"; return 0; }
-  if deploy_with_overrides "$key=$v" \
-     && snapshot_stack \
-     && [[ "$(snap_status)" == *_COMPLETE ]]; then
-    local newval
-    newval="$(snap_param "$key")"
-    say "done. $label is now: $newval"
-    say "the agent-side wiring must match; IAM decides either way."
-  else
-    echo "deploy failed"; events_hint; return 1
-  fi
-}
-
-# edit_trust_wiring — the trust-side gates: which principals may assume
-# (AgentRoleArns, one per agent workspace), the optional external ID, the
-# session-name pin, and (shared-role stacks only) the AuthorizedUser the
-# source identity must match. Each change redeploys once and preserves
-# every other parameter.
-edit_trust_wiring() {
-  updatable_stack || return 1
-  if param_defined AgentRoleArns; then
-    say "agent role principals [AgentRoleArns] — the IRSA roles in Namazu's
-  hosting account [308044622771] allowed to assume this role, one per
-  agent workspace (arn:aws:iam::308044622771:role/cosell-runner-<workspace-id>);
-  the sts:SourceIdentity condition still applies to every one of them:"
-    cur_arns="$(snap_param AgentRoleArns)"
-    if [[ -n "$cur_arns" ]]; then snap_param AgentRoleArns | tr ',' '\n' | sed 's/^/    /'
-    else echo "    <empty — account-root trust>"; fi
-    local v=""
-    read -r -p "new comma-separated list (blank: keep current): " v || true
-    if [[ -n "$v" ]]; then
-      local r ok=1
-      local -a parts=()
-      IFS=',' read -ra parts <<< "$v"
-      for r in ${parts[@]+"${parts[@]}"}; do
-        [[ "$r" =~ ^arn:aws:iam::[0-9]{12}:role/ ]] || { echo "  not a role ARN: $r"; ok=0; }
-      done
-      if [[ "$ok" == 1 ]]; then
-        local joined
-        joined="$(IFS=','; echo "${parts[*]}")"
-        deploy_with_overrides "AgentRoleArns=$joined" \
-          && snapshot_stack \
-          && say "principals updated:"           && snap_param AgentRoleArns | tr ',' '\n' | sed 's/^/    /' \
-          || { echo "deploy failed"; events_hint; return 1; }
-      fi
-    fi
-  fi
-  echo
-  change_param_free ExternalId "external ID [confused-deputy protection]" '^[A-Za-z0-9_+=,.@-]{2,1224}$' "optional shared secret; the agent side must carry the same value or every assume is denied. Blank keeps the current value"
-  echo
-  change_pin EnforceSessionName "session-name pin" "true false"
-  echo
-  if [[ -n "$(snap_param AuthorizedUser)" ]]; then
-    change_param_free AuthorizedUser "AuthorizedUser [shared-role stacks]" '^[A-Za-z0-9_+=,.@-]{2,64}$' "the person every action is attributed to: changes the trust condition and the role tag; the agent-side source_identity must match. Per-user stacks bind identity per role via the Users list instead"
-  fi
 }
 
 # change_pin — show, confirm, and redeploy one stack parameter. The
@@ -617,54 +540,6 @@ remove_user() {
   print_role_arns
 }
 
-# Candidate names for options 1/2, harvested best-effort from classic IAM
-# and IAM Identity Center (via each SSO instance's identity store). These
-# are suggestions only — whatever is typed is still validated, and Identity
-# Center UserNames are often email addresses that can exceed the
-# 30-character role-name budget, in which case pick a shorter alias.
-list_iam_candidates() {
-  local out
-  say "classic IAM users (first 100):"
-  if out="$(aws iam list-users --max-items 100 --query 'Users[].UserName' --output text 2>/dev/null)"; then
-    if [[ -n "$out" ]]; then
-      printf '%s\n' "$out" | tr '\t' '\n' | while IFS= read -r u; do echo "  $u"; done
-    else
-      echo "  (none)"
-    fi
-  else
-    echo "  (could not list — needs iam:ListUsers)"
-  fi
-
-  say "IAM Identity Center users:"
-  if ! out="$(aws sso-admin list-instances --query 'Instances[].IdentityStoreId' --output text 2>/dev/null)"; then
-    echo "  (could not list — needs sso-admin:ListInstances, in the region where Identity Center is enabled)"
-    return 0
-  fi
-  if [[ -z "$out" ]]; then
-    echo "  (no Identity Center instances in this account/region — Identity Center lives in the management or delegated-admin account's region)"
-    return 0
-  fi
-  out="$(printf '%s\n' "$out" | tr '\t' '\n')" # one store id per line
-  local store
-  while IFS= read -r store; do
-    [[ -n "$store" ]] || continue
-    if out="$(aws identitystore list-users --identity-store-id "$store" --max-items 100 \
-              --query 'Users[].[UserName,DisplayName]' --output text 2>/dev/null)"; then
-      if [[ -n "$out" ]]; then
-        printf '%s\n' "$out" | while IFS=$'\t' read -r un dn; do
-          echo "  $un${dn:+  ($dn)}"
-        done
-      else
-        echo "  (no users in identity store $store)"
-      fi
-    else
-      echo "  (could not list identity store $store — needs identitystore:ListUsers)"
-    fi
-  done <<< "$out"
-
-  say "these are suggestions only (capped at 100 per source) — a chosen name must be 2-30 characters (letters/digits/_+=,.@-); it becomes part of the role name and the sts:SourceIdentity."
-}
-
 delete_stack() {
   stack_exists || { echo "no stack $STACK_NAME — nothing to delete"; return 0; }
   confirm "delete stack $STACK_NAME and every user role in it?" || { echo "aborted"; return 0; }
@@ -721,17 +596,7 @@ THE MODEL
    ARN. Read-only. Anything the stack's template doesn't manage is
    labeled as such.
 
-4) LIST CANDIDATE USERS
-   A best-effort, read-only sweep of classic IAM users and IAM
-   Identity Center users (one query per SSO instance), to copy
-   sensible names from. Identity Center names are often email
-   addresses — usually too long for the 30-character role-name
-   budget; pick a shorter alias for those people. Needs
-   iam:ListUsers / sso-admin:ListInstances / identitystore:ListUsers,
-   and the Identity Center lookup only works in the region where
-   Identity Center is enabled.
-
-5) REMOVE A USER
+4) REMOVE A USER
    step 1  pick the user by number from the current list.
    step 2  confirm. The stack is updated with the shortened Users
            list and that user's IAM role is deleted with it. The
@@ -740,7 +605,7 @@ THE MODEL
            Users list — the template forbids that, so the script
            offers to delete the whole stack instead.
 
-6) CHANGE THE SELLING CATALOG
+5) CHANGE THE SELLING CATALOG
    partnercentral-selling — opportunities, invitations, solutions.
    Enforced by IAM on every role in the stack ('Sandbox' for sandbox
    'AWS' production / 'Both'; there is no unpinned option: an
@@ -748,13 +613,13 @@ THE MODEL
    update the agent-side catalog hint to match (the IAM condition
    decides either way).
 
-7) CHANGE THE FUNDING CATALOG
+6) CHANGE THE FUNDING CATALOG
    partnercentral-benefits — funding applications, a real-money ask,
    so its pin is SEPARATE from the selling pin and defaults to
    Sandbox: enabling production selling never silently enables
    production funding. Same three-way choice, same enforcement.
 
-8) TOGGLE OUTBOUND ENGAGEMENT
+7) TOGGLE OUTBOUND ENGAGEMENT
    on:  engagements + engagement invitations to bring AWS sellers
         onto partner-originated opportunities, the
         engagement<->opportunity task machinery (including
@@ -763,27 +628,11 @@ THE MODEL
    off: the role stays receive-only. Default. Enforced by IAM
         (explicit Deny on the outbound action set when off).
 
-9) TOGGLE ALLIANCE CONNECTIONS
+8) TOGGLE ALLIANCE CONNECTIONS
    on:  the Account API's partner-to-partner motions: connections
         + connection invitations (alliance-led co-sell), partner
         reads, alliance-lead contact.
    off: default. Enforced by IAM the same way.
-
-10) EDIT THE TRUST WIRING
-   The trust-side gates:
-     agent role principals  (shared-role stacks) the IRSA roles
-                            allowed to assume, one per agent
-                            workspace; the source-identity condition
-                            applies to each.
-     external ID            optional shared secret for assume-role.
-     session-name pin       forces sessions to be named
-                            '<user>-session'.
-     AuthorizedUser         (shared-role stacks) the person every
-                            action is attributed to; changes the
-                            trust condition and the role tag, and
-                            the agent-side source_identity must
-                            match.
-   Each change redeploys once and preserves every other parameter.
 
 0) DELETE THE ACCESS STACK
    Deletes the stack and EVERY user role in it; all Namazu agent
@@ -798,13 +647,12 @@ FIELD REFERENCE
                 same charset). Only set it with your Namazu contact's
                 agreement — misconfigured means every assume is denied.
   catalogs      'Sandbox', 'AWS', or 'Both' for each of selling and
-                funding (see options 6 and 7); enforced by IAM.
+                funding (see options 5 and 6); enforced by IAM.
   motions       'true'/'false' toggles for outbound engagement
-                (option 8) and alliance connections (option 9).
-  principals    (shared-role stacks) comma-separated IRSA role ARNs
-                trusted to assume (see option 8).
-  session pin   forces sessions to be named '<user>-session'; enable
-                only if the Namazu side configures session names.
+                (option 7) and alliance connections (option 8).
+  session pin   forces sessions to be named '<user>-session'; set
+                at create time. Enable only if the Namazu side
+                configures session names.
 
 CLI FLAGS
   --stack-name  manage a different stack (default namazu-cosell-manager)
@@ -819,10 +667,6 @@ gate_param() {
     funding)        echo "BenefitsCatalogPin" ;;
     outbound)       echo "EnableOutboundEngagement" ;;
     alliance)       echo "EnableAllianceConnections" ;;
-    external-id)    echo "ExternalId" ;;
-    session-pin)    echo "EnforceSessionName" ;;
-    agents)         echo "AgentRoleArns" ;;
-    authorized-user) echo "AuthorizedUser" ;;
     *) echo "" ;;
   esac
 }
@@ -833,10 +677,6 @@ gate_label() {
     funding)        echo "funding catalog" ;;
     outbound)       echo "outbound engagement [partner-initiated co-sell]" ;;
     alliance)       echo "alliance connections [partner-to-partner]" ;;
-    external-id)    echo "external ID [confused-deputy protection]" ;;
-    session-pin)    echo "session-name pin" ;;
-    agents)         echo "agent role principals [shared-role stacks]" ;;
-    authorized-user) echo "AuthorizedUser [shared-role stacks]" ;;
     *) echo "$1" ;;
   esac
 }
@@ -848,18 +688,6 @@ validate_gate() {
       case "$val" in Sandbox|AWS|Both) return 0 ;; esac ;;
     outbound|alliance|session-pin)
       case "$val" in true|false) return 0 ;; esac ;;
-    external-id)
-      [[ -z "$val" || "$val" =~ $EXTID_RE ]] && return 0 ;;
-    agents)
-      local r ok=1
-      local -a parts=()
-      IFS=',' read -ra parts <<< "$val"
-      for r in ${parts[@]+"${parts[@]}"}; do
-        [[ "$r" =~ ^arn:aws:iam::[0-9]{12}:role/ ]] || { ok=0; break; }
-      done
-      [[ ${#parts[@]} -ge 1 && "$ok" == 1 ]] && return 0 ;;
-    authorized-user)
-      [[ "$val" =~ ^[A-Za-z0-9_+=,.@-]{2,64}$ ]] && return 0 ;;
   esac
   return 1
 }
@@ -1040,13 +868,9 @@ cmd_set() {
   for pair in ${pairs[@]+"${pairs[@]}"}; do
     key="${pair%%=*}"; val="${pair#*=}"
     pkey="$(gate_param "$key")"
-    [[ -n "$pkey" ]] || die "unknown gate: $key [known: selling funding outbound alliance external-id session-pin agents authorized-user]"
+    [[ -n "$pkey" ]] || die "unknown gate: $key [known: selling funding outbound alliance]"
     validate_gate "$key" "$val" || die "invalid value for $key: $val"
     cur="$(snap_param "$pkey")"
-    case "$key" in
-      agents|authorized-user)
-        [[ -n "$cur" ]] || die "this stack's template doesn't carry $pkey" ;;
-    esac
     overrides+=("$pkey=$val")
     if [[ "$val" == "$cur" ]]; then
       plan+=("  $(gate_label "$key"): $cur        [unchanged]")
@@ -1086,11 +910,10 @@ case "$COMMAND" in
   status)     cmd_status; exit 0 ;;
   drift)      cmd_drift; exit 0 ;;
   set)        cmd_set "$@"; exit $? ;;
-  candidates) list_iam_candidates; exit 0 ;;
   delete)     delete_stack; exit 0 ;;
   help)       show_help; exit 0 ;;
   menu)       : ;;
-  *)          die "unknown command: $COMMAND (commands: status set drift candidates delete menu help; or run with no command for the menu)" ;;
+  *)          die "unknown command: $COMMAND (commands: status set drift delete menu help; or run with no command for the menu)" ;;
 esac
 
 interactive_menu() {
@@ -1103,13 +926,11 @@ while true; do
   echo "  1) Create the access stack (first-time setup)."
   echo "  2) Add a user."
   echo "  3) List users, role ARNs, and the IAM gates in force."
-  echo "  4) List candidate users (IAM / IAM Identity Center)."
-  echo "  5) Remove a user."
-  echo "  6) Change the selling catalog (Sandbox / AWS / Both)."
-  echo "  7) Change the funding catalog (Sandbox / AWS / Both)."
-  echo "  8) Toggle outbound engagement (partner-initiated co-sell)."
-  echo "  9) Toggle alliance connections (partner-to-partner)."
-  echo "  10) Edit the trust wiring (principals, external ID, session pin)."
+  echo "  4) Remove a user."
+  echo "  5) Change the selling catalog (Sandbox / AWS / Both)."
+  echo "  6) Change the funding catalog (Sandbox / AWS / Both)."
+  echo "  7) Toggle outbound engagement (partner-initiated co-sell)."
+  echo "  8) Toggle alliance connections (partner-to-partner)."
   echo "  0) Delete the access stack entirely."
   echo "  h) Help — what each option does, step by step."
   echo "  q) Quit."
@@ -1118,17 +939,15 @@ while true; do
     1) create_stack ;;
     2) add_users ;;
     3) list_users ;;
-    4) list_iam_candidates ;;
-    5) remove_user ;;
-    6) change_selling_catalog ;;
-    7) change_funding_catalog ;;
-    8) change_outbound_engagement ;;
-    9) change_alliance_connections ;;
-    10) edit_trust_wiring ;;
+    4) remove_user ;;
+    5) change_selling_catalog ;;
+    6) change_funding_catalog ;;
+    7) change_outbound_engagement ;;
+    8) change_alliance_connections ;;
     0) delete_stack ;;
     h|H) show_help ;;
     q|Q) exit 0 ;;
-    *) echo "Invalid choice — please enter 1–9, 0, h, or q." ;;
+    *) echo "Invalid choice — please enter 1–8, 0, h, or q." ;;
   esac
 done
 }
