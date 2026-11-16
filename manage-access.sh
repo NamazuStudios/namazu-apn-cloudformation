@@ -5,7 +5,10 @@
 # users, and lists them (with role ARNs) alongside candidate user names
 # harvested from classic IAM and IAM Identity Center. One stack holds every
 # user; the stack's `Users` parameter IS the user list, so add/remove is a
-# stack update and list is reading it back.
+# stack update and list is reading it back. After create and add-user —
+# and on demand (option 9 / the `ticket` command) — it prints a TICKET
+# REPORT: everything the operator needs to put into a support ticket for
+# Namazu (external ID, trusted principals, role ARNs, contract entries).
 #
 # The shared-role template (templates/opportunity-manager-role.yaml) is NOT
 # managed here: it is a single-user, one-off deploy for the
@@ -70,8 +73,11 @@ Usage: ./manage-access.sh [--stack-name NAME] [--region REGION]
 
 Menu: create the stack, add/remove users, list current users with their
 role ARNs, list candidate user names from IAM / IAM Identity Center, or
-delete the stack. In the menu, 'h' shows a detailed help: what each
-option does, step by step, plus a field reference.
+delete the stack. After create and add-user the script prints a ticket
+report — everything to hand to Namazu (external ID, principals, role
+ARNs, contract entries); `ticket` reprints it on demand. In the menu,
+'h' shows a detailed help: what each option does, step by step, plus a
+field reference.
 
 Requires: bash, the AWS CLI, and credentials for the AWS account linked to
 your Partner Central account. Manages templates/per-user-roles.yaml — for
@@ -200,6 +206,164 @@ print_role_arns() { # $@ = users to report (empty = all)
   done < "$SNAP_DIR/arns"
 }
 
+# ---- ticket report -----------------------------------------------------------
+# Everything the operator needs to put into a support ticket for Namazu:
+# the ExternalId secret, the trusted runner principals, every role ARN,
+# and the contract entries rendered in the exact shape the Namazu
+# deployment contract (the agent_apn block) carries. Read-only — built
+# entirely from the snapshot, so it always reflects the live stack.
+# Printed after create and add-user, and on demand (menu option 9 /
+# `ticket`), so the ticket a customer sends is never assembled by hand.
+
+# One RoleArn output by user name. The shared-role stack has a single
+# output keyed plain "RoleArn" — pass an empty user for that one.
+ticket_role_arn() { # $1 = user ("" = the shared-role output)
+  awk -F'\t' -v k="RoleArn$1" '$1 == k { print $2; exit }' "$SNAP_DIR/arns" 2>/dev/null
+}
+
+# One contract-entry block — the five agent_apn fields this stack
+# governs, in the same shape they take in the deployment contract.
+ticket_entry() { # $1=note $2=consume_role_arn $3=user_name $4=source_identity
+  local extid catalog
+  extid="$(snap_param ExternalId)"
+  catalog="$(snap_param CatalogPin)"
+  echo "  # $1"
+  echo "  \"consume_role_arn\": \"${2:-<pending — see ROLES above>}\","
+  echo "  \"user_name\":        \"${3:-<confirm with Namazu>}\","
+  echo "  \"source_identity\":  \"${4:-<confirm with Namazu>}\","
+  echo "  \"external_id\":      \"${extid:-<not set — required: redeploy>}\","
+  echo "  \"catalog\":          \"${catalog:-Sandbox}\""
+}
+
+# The user_name half of a runner principal's role name. Runner roles
+# are named cosell-runner-<user_name>-<workspace>, the workspace being a
+# 24-hex id at the tail — greedy user_name capture anchored on that.
+runner_user_name() { # $1 = runner role ARN; echoes "user workspace" or nothing
+  local name="${1##*/}"
+  [[ "$name" =~ ^cosell-runner-(.+)-([0-9a-f]{24})$ ]] \
+    && echo "${BASH_REMATCH[1]} ${BASH_REMATCH[2]}"
+}
+
+print_ticket_report() {
+  snapshot_stack
+  local status extid agents auser users
+  status="$(snap_status)"
+  if [[ -z "$status" ]]; then
+    echo "no stack $STACK_NAME — nothing to report (option 1 creates it)"
+    return 1
+  fi
+  extid="$(snap_param ExternalId)"
+  agents="$(snap_param AgentRoleArns)"
+  auser="$(snap_param AuthorizedUser)"
+  users="$(snap_users)"
+  local bar u a uw rarn g
+  bar="$(printf '%0.s─' $(seq 1 64))"
+
+  say "$bar"
+  echo "TICKET REPORT — Namazu co-selling agent access"
+  echo "send this to Namazu (a support ticket works): it is everything"
+  echo "they need to wire the agent deployment to the roles below."
+  echo "$bar"
+  echo "account:  $account"
+  echo "region:   $region"
+  echo "stack:    $STACK_NAME ($status)"
+
+  echo
+  echo "EXTERNAL ID (secret — every assume-role must present it; any"
+  echo "mismatch is a total deny):"
+  echo "  ${extid:-<not set — required: redeploy with the current template>}"
+
+  echo
+  if [[ -n "$agents" ]]; then
+    echo "TRUSTED PRINCIPALS (from AgentRoleArns — only these runner roles"
+    echo "may assume, and each still needs SourceIdentity + the external ID):"
+    while IFS= read -r a; do
+      [[ -n "$a" ]] || continue
+      uw="$(runner_user_name "$a")"
+      if [[ -n "$uw" ]]; then
+        echo "  $a"
+        echo "      user_name: ${uw%% *}   workspace: ${uw##* }"
+      else
+        echo "  $a   (user_name/workspace: confirm with Namazu)"
+      fi
+    done < <(tr ',' '\n' <<< "$agents")
+  else
+    echo "TRUSTED PRINCIPALS: account-root trust (every principal in the"
+    echo "Namazu hosting account may try; SourceIdentity + the external ID"
+    echo "still gate every assume)."
+  fi
+
+  echo
+  echo "ROLES (what the agent assumes — each becomes a consume_role_arn):"
+  if [[ -n "$users" && "$users" != "None" ]]; then
+    while IFS= read -r u; do
+      [[ -n "$u" ]] || continue
+      echo "  $u -> $(ticket_role_arn "$u")"
+      echo "      assume must present: SourceIdentity \"$u\" + the external ID"
+    done < <(tr ',' '\n' <<< "$users")
+  else
+    echo "  shared role -> $(ticket_role_arn "")"
+    echo "      assume must present: SourceIdentity \"${auser:-<confirm with Namazu>}\" + the external ID"
+  fi
+
+  echo
+  echo "CONTRACT ENTRIES (merge verbatim into the workspace agent_apn block)"
+  echo
+  local -a entries=()
+  if [[ -n "$users" && "$users" != "None" ]]; then
+    # Per-user stack: one entry per user; the runner principal that serves
+    # them is the one whose user_name matches (role names are unique
+    # case-insensitively, so the match is folded).
+    local match_a match_u
+    while IFS= read -r u; do
+      [[ -n "$u" ]] || continue
+      rarn="$(ticket_role_arn "$u")"
+      match_a=""; match_u=""
+      if [[ -n "$agents" ]]; then
+        while IFS= read -r a; do
+          uw="$(runner_user_name "$a")"
+          if [[ -n "$uw" ]] && [[ "$(lower "${uw%% *}")" == "$(lower "$u")" ]]; then
+            match_a="$a"; match_u="${uw%% *}"; break
+          fi
+        done < <(tr ',' '\n' <<< "$agents")
+      fi
+      if [[ -n "$match_a" ]]; then
+        entries+=("$(ticket_entry "user $u — runner ${match_a##*/}" "$rarn" "$match_u" "$u")")
+      else
+        entries+=("$(ticket_entry "user $u (no matching runner principal in AgentRoleArns)" "$rarn" "" "$u")")
+      fi
+    done < <(tr ',' '\n' <<< "$users")
+  else
+    # Shared-role stack: one role, one AuthorizedUser — an entry per runner
+    # principal, each pairing the shared role with that workspace.
+    rarn="$(ticket_role_arn "")"
+    if [[ -n "$agents" ]]; then
+      while IFS= read -r a; do
+        [[ -n "$a" ]] || continue
+        uw="$(runner_user_name "$a")"
+        if [[ -n "$uw" ]]; then
+          entries+=("$(ticket_entry "workspace ${uw##* } — runner ${a##*/}" "$rarn" "${uw%% *}" "$auser")")
+        else
+          entries+=("$(ticket_entry "runner ${a##*/} (confirm the workspace with Namazu)" "$rarn" "" "$auser")")
+        fi
+      done < <(tr ',' '\n' <<< "$agents")
+    else
+      entries+=("$(ticket_entry "shared role, account-root trust" "$rarn" "" "$auser")")
+    fi
+  fi
+  printf '%s\n\n' ${entries[@]+"${entries[@]}"}
+
+  echo "CAPABILITY GATES (advertised as tags on each role; the agent reads"
+  echo "them at session start and fails fast on a denial):"
+  g="$(snap_param CatalogPin)";               echo "  selling catalog:      ${g:-<unpinned>}"
+  g="$(snap_param BenefitsCatalogPin)";       echo "  funding catalog:      ${g:-<no funding grant in this template>}"
+  g="$(snap_param EnableOutboundEngagement)"; echo "  outbound engagement:  ${g:-<not a knob in this template>}"
+  g="$(snap_param EnableAllianceConnections)";echo "  alliance connections: ${g:-<not a knob in this template>}"
+  echo
+  echo "session-name pin: $(snap_param EnforceSessionName)"
+  echo "$bar"
+}
+
 confirm() { # $1 = question; returns 0 on yes
   local reply=""
   read -r -p "$1 [y/N]: " reply || true
@@ -301,18 +465,28 @@ create_stack() {
 
   # First create: offer the optional hardening/pinning parameters with
   # sensible defaults (later updates preserve whatever is chosen here).
-  say "external ID (optional):
-  an extra secret the Namazu agent must present when assuming these
-  roles — confused-deputy protection on top of the account trust.
-  Set one only if your Namazu contact asked for it: they must
-  configure the same value on the agent side, or every assume-role
+  say "external ID (required — confused-deputy protection):
+  a secret the Namazu agent must present when assuming these roles.
+  Generated per workspace by default (cryptographically random —
+  recommended); or enter your own. Either way it must be shared with
+  your Namazu contact (a support ticket works) so it lands in the
+  deployment contract — both sides must match, or every assume-role
   is denied. rules: 2+ characters; letters, digits, and _+=,.@- only."
   v=""
-  read -r -p "external ID for extra protection (blank: none): " v || true
-  if [[ -n "$v" ]]; then
-    [[ "$v" =~ $EXTID_RE ]] || die "invalid external ID (at least 2 characters; letters/digits/_+=,.@- only)"
-    extra+=("ExternalId=$v")
-  fi
+  read -r -p "external ID — [g]enerate a random one, [e]nter your own, [Enter]=generate: " v || true
+  case "$v" in
+    ""|g|G)
+      v="$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)"
+      say "generated external ID: $v"
+      say "share this with your Namazu contact — it must be wired into the
+  deployment contract exactly as-is." ;;
+    e|E)
+      read -r -p "external ID value: " v || true
+      [[ -n "$v" ]] || die "external ID cannot be empty" ;;
+    *) die "external ID: answer g, e, or press Enter to generate" ;;
+  esac
+  [[ "$v" =~ $EXTID_RE ]] || die "invalid external ID (at least 2 characters; letters/digits/_+=,.@- only)"
+  extra+=("ExternalId=$v")
   say "catalog:
   Partner Central has two catalogs: 'Sandbox' (AWS's isolated test
   catalog — placeholder data, safe to exercise against) and 'AWS'
@@ -370,8 +544,8 @@ create_stack() {
     || { echo "deploy failed"; events_hint; return 1; }
 
   snapshot_stack # the create added outputs
-  say "done. stack status: $(snap_status). Role ARNs to hand to your Namazu contact:"
-  print_role_arns ${NEW_USERS[@]+"${NEW_USERS[@]}"}
+  say "done. stack status: $(snap_status)."
+  print_ticket_report
 }
 
 add_users() {
@@ -412,8 +586,8 @@ add_users() {
   deploy_with_users "$users_value" || { echo "deploy failed"; events_hint; return 1; }
 
   snapshot_stack # the update added outputs
-  say "done. Role ARNs to hand to your Namazu contact:"
-  print_role_arns ${NEW_USERS[@]+"${NEW_USERS[@]}"}
+  say "done. The new user and their role are in the report below."
+  print_ticket_report
 }
 
 list_users() {
@@ -481,6 +655,7 @@ change_pin() {
     newval="$(snap_param "$key")"
     say "done. $label is now: $newval"
     say "IAM re-evaluates per request; a live agent session picks this up at its next credential refresh, about 1h. Update the agent-side hint to match. IAM decides either way."
+    say "the gates changed — reprint the ticket report (option 9) before contacting Namazu: its capability gates reflect the new state."
   else
     echo "deploy failed"; events_hint; return 1
   fi
@@ -538,6 +713,7 @@ remove_user() {
   snapshot_stack # the update removed outputs
   say "done. '$victim' and their role are gone; remaining users:"
   print_role_arns
+  say "tell Namazu to drop the contract entry for '$victim' — the role it names is deleted."
 }
 
 delete_stack() {
@@ -574,11 +750,10 @@ THE MODEL
    step 3  optionally set an external ID, a catalog pin, and/or the
            session-name pin (see FIELD REFERENCE). These are only
            asked here; later edits preserve them.
-   step 4  confirm — the script deploys the stack and prints each
-           user's role ARN.
-   step 5  hand the role ARNs (and the external ID, if you set one)
-           to your Namazu contact; they wire them into the agent
-           deployment on their side.
+   step 4  confirm — the script deploys the stack and prints a TICKET
+           REPORT: everything to hand to your Namazu contact (the
+           external ID, the trusted principals, every role ARN, and the
+           contract entries they paste on their side).
 
 2) ADD A USER
    step 1  enter the name(s). Duplicates — already on the stack or
@@ -587,7 +762,8 @@ THE MODEL
    step 2  confirm. The stack is UPDATED with the extended Users
            list; every other parameter is re-passed unchanged, so an
            external ID / catalog pin chosen at creation survives.
-   step 3  hand the new role ARN to your Namazu contact.
+   step 3  the script reprints the ticket report — the new user, their
+           role ARN, and the contract entry to hand to Namazu are in it.
 
 3) LIST USERS AND THE IAM GATES IN FORCE
    Shows the stack status, both catalog pins (selling and funding),
@@ -633,6 +809,17 @@ THE MODEL
         + connection invitations (alliance-led co-sell), partner
         reads, alliance-lead contact.
    off: default. Enforced by IAM the same way.
+
+9) PRINT THE TICKET REPORT
+   Everything to send Namazu, copy-paste ready: the account/region/
+   stack, the external ID, the trusted runner principals (with the
+   user_name + workspace each serves), every role ARN with the
+   SourceIdentity it requires, the contract entries rendered verbatim
+   in the agent_apn shape (consume_role_arn, user_name,
+   source_identity, external_id, catalog), and the capability gates in
+   force. Read-only — run it anytime: after a gate flip (5-8), the
+   gates in the report are the live ones; after adding or removing a
+   user, the entries are the current set.
 
 0) DELETE THE ACCESS STACK
    Deletes the stack and EVERY user role in it; all Namazu agent
@@ -889,10 +1076,11 @@ case "$COMMAND" in
   status)     cmd_status; exit 0 ;;
   drift)      cmd_drift; exit 0 ;;
   set)        cmd_set "$@"; exit $? ;;
+  ticket)     print_ticket_report; exit 0 ;;
   delete)     delete_stack; exit 0 ;;
   help)       show_help; exit 0 ;;
   menu)       : ;;
-  *)          die "unknown command: $COMMAND (commands: status set drift delete menu help; or run with no command for the menu)" ;;
+  *)          die "unknown command: $COMMAND (commands: status set drift ticket delete menu help; or run with no command for the menu)" ;;
 esac
 
 interactive_menu() {
@@ -910,6 +1098,7 @@ while true; do
   echo "  6) Change the funding catalog (Sandbox / AWS / Both)."
   echo "  7) Toggle outbound engagement (partner-initiated co-sell)."
   echo "  8) Toggle alliance connections (partner-to-partner)."
+  echo "  9) Print the ticket report (everything to send Namazu)."
   echo "  0) Delete the access stack entirely."
   echo "  h) Help — what each option does, step by step."
   echo "  q) Quit."
@@ -923,10 +1112,11 @@ while true; do
     6) change_funding_catalog ;;
     7) change_outbound_engagement ;;
     8) change_alliance_connections ;;
+    9) print_ticket_report ;;
     0) delete_stack ;;
     h|H) show_help ;;
     q|Q) exit 0 ;;
-    *) echo "Invalid choice — please enter 1–8, 0, h, or q." ;;
+    *) echo "Invalid choice — please enter 1–9, 0, h, or q." ;;
   esac
 done
 }
