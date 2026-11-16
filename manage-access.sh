@@ -220,7 +220,25 @@ deploy_with_overrides() { # $@ = KEY=VALUE pairs to substitute into the snapshot
 }
 
 events_hint() {
-  echo "  for the reason: aws cloudformation describe-stack-events --stack-name $STACK_NAME --region <your-region>"
+  # Surface the actual error, not just the fact of it: the newest
+  # FAILED-resource reason from the stack's events. The trailing
+  # (RequestToken: …)/(HandlerErrorCode: …) metadata is trimmed — the
+  # message is what the operator needs.
+  local reason
+  reason="$(aws cloudformation describe-stack-events --stack-name "$STACK_NAME" \
+    --query 'sort_by(StackEvents, &Timestamp)[?ResourceStatus==`UPDATE_FAILED` || ResourceStatus==`CREATE_FAILED` || ResourceStatus==`UPDATE_ROLLBACK_FAILED` || ResourceStatus==`ROLLBACK_FAILED`].ResourceStatusReason' \
+    --output text 2>/dev/null | tail -1)"
+  reason="${reason%% (RequestToken*}"
+  reason="${reason%% (HandlerErrorCode*}"
+  if [[ -n "$reason" && "$reason" != "None" ]]; then
+    say "the error from CloudFormation:"
+    printf '%s\n' "$reason" | fold -s -w 74 | sed 's/^/  /'
+  else
+    say "no failure reason found in the stack events (the error above,
+  if any, is from the deploy command itself — e.g. a rejected
+  changeset, which does not write stack events)."
+  fi
+  echo "  full history: aws cloudformation describe-stack-events --stack-name $STACK_NAME --region <your-region>"
 }
 
 # ---- ticket report -----------------------------------------------------------
