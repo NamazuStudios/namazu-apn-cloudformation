@@ -5,16 +5,17 @@
 # stack, assumable by ZERO OR MORE principals from Namazu's account.
 # Create (option 1) is ONE SHOT: it needs nothing but the external ID
 # (generated unless --external-id) and deploys the role with its trust
-# authorizing NOBODY. Adding a user (option 2) specifies the four
-# facts — identifier (baked into the runner role name Namazu's
-# terraform creates: cosell-agent-<identifier>-<workspace>), the
-# workspace id, the external user id (their sts:SourceIdentity), and
-# hence the expected principal — one Allow statement per user, composed
-# by this script into the role's trust. Removing a user (option 4)
-# drops theirs. Deleting the stack destroys the role. Gate flips
-# (options 5-8) and the on-demand ticket report (option 9) round it
-# out; after every add the report is the exact configuration Namazu
-# needs.
+# authorizing NOBODY. Adding a user (option 2) asks two questions, one
+# at a time: the identifier — the user's org-internal notation
+# (recommended: first initial + last name, e.g. jsmith), baked into the
+# runner role name to be provisioned by Namazu Studios
+# (cosell-agent-<identifier>-<workspace>, their ONLY principal) AND the
+# sts:SourceIdentity their sessions present — and their workspace id in
+# Namazu Cloud. One Allow statement per user, composed by this script
+# into the role's trust. Removing a user (option 4) drops theirs.
+# Deleting the stack destroys the role. Gate flips (options 5-8) and
+# the on-demand ticket report (option 9) round it out; after every add
+# the report is the exact configuration Namazu needs.
 #
 # Requirements: bash + the AWS CLI, authenticated as a principal allowed
 # to create IAM roles in the AWS account linked to your Partner Central
@@ -31,10 +32,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Create (option 1) is one shot — it needs nothing but the ExternalId
 # (generated unless --external-id) and deploys the role with its trust
 # authorizing NOBODY. Users (options 2/4) are the whole access model:
-# each entry <identifier>|<workspace-id>|<external-user-id> adds one
-# trust statement — the runner Namazu's terraform created for that
-# workspace, presenting that user's source identity. The script composes
-# the trust JSON from the list; zero users = deny-all.
+# each entry <identifier>|<workspace-id> adds one trust statement — the
+# runner to be provisioned by Namazu Studios for that workspace, with
+# the identifier (their org-internal notation, e.g. jsmith) as the
+# SourceIdentity. The script composes the trust JSON from the list;
+# zero users = deny-all.
 TEMPLATE="$SCRIPT_DIR/templates/opportunity-manager-role.yaml"
 STACK_NAME="namazu-cosell-manager"
 
@@ -50,7 +52,8 @@ NAMAZU_ACCOUNT=308044622771
 WS_RE='^[0-9a-f]{24}$'
 
 # The user_name half: the operator-chosen tracking label. IAM charset,
-# capped at 20 characters — the addon's terraform truncates to 20
+# capped at 20 characters — the Namazu Studios provisioning truncates
+# beyond 20
 # (substr(...,0,20)) when it names the runner, so staying within 20
 # guarantees the ARN this script constructs equals the role the addon
 # creates.
@@ -95,9 +98,10 @@ Usage: ./manage-access.sh [--stack-name NAME] [--region REGION]
                  unless this is given)
 
 Menu: create the access stack (the role exists; its trust authorizes
-nobody), add/remove users (each entry <identifier>|<workspace-id>|
-<external-user-id> becomes one trust statement: their runner + their
-source identity), flip
+nobody), add/remove users (two questions per user — their identifier
+(org-internal notation, e.g. jsmith: baked into the runner role name
+to be provisioned by Namazu Studios AND the SourceIdentity they
+present) and their workspace id — one trust statement each), flip
 the capability gates, print the ticket report to send Namazu, or
 delete the stack (the role goes with it). `ticket` reprints the full
 report on demand; in the menu, 'h' shows a detailed help.
@@ -257,7 +261,7 @@ print_ticket_report() {
     return 1
   fi
   extid="$(snap_param ExternalId)"
-  local bar e id ws src g
+  local bar e id ws g
   bar="$(printf '%0.s─' $(seq 1 64))"
 
   say "$bar"
@@ -276,8 +280,8 @@ print_ticket_report() {
   while IFS= read -r e; do
     [[ -n "$e" ]] || continue
     n_users=$((n_users+1))
-    IFS='|' read -r id ws src <<< "$e"
-    echo "  $ws   identifier: $id   source identity: $src"
+    IFS='|' read -r id ws <<< "$e"
+    echo "  $ws   identifier/source identity: $id"
   done < <(current_users)
   [[ "$n_users" -eq 0 ]] && echo "  (none yet — they come with the users: option 2 adds them)"
 
@@ -288,9 +292,10 @@ print_ticket_report() {
 
   echo
   if [[ "$n_users" -gt 0 ]]; then
-    echo "TRUSTED PRINCIPALS (one per user — the runner Namazu's terraform"
-    echo "creates for their workspace; each must present their source"
-    echo "identity + the external ID):"
+    echo "TRUSTED PRINCIPALS (one per user — the runner role to be"
+    echo "provisioned by Namazu Studios for their workspace; each must"
+    echo "present their identifier as the source identity + the external"
+    echo "ID):"
     while IFS= read -r e; do
       [[ -n "$e" ]] || continue
       render_user "$e"
@@ -314,8 +319,8 @@ print_ticket_report() {
   rarn="$(ticket_role_arn)"
   while IFS= read -r e; do
     [[ -n "$e" ]] || continue
-    IFS='|' read -r id ws src <<< "$e"
-    entries+=("$(ticket_entry "workspace $ws — runner $(runner_arn_of "$id" "$ws" | sed 's|.*/||')" "$rarn" "$id" "$src")")
+    IFS='|' read -r id ws <<< "$e"
+    entries+=("$(ticket_entry "workspace $ws — runner $(runner_arn_of "$id" "$ws" | sed 's|.*/||')" "$rarn" "$id" "$id")")
   done < <(current_users)
   if [[ ${#entries[@]} -eq 0 ]]; then
     echo "  (no contract entries yet — nothing to wire until users are"
@@ -365,15 +370,14 @@ updatable_stack() {
 
 # ---- user entries -------------------------------------------------------------
 # A USER is one entry in the role's trust, and one line in the Users
-# parameter: <identifier>|<workspace-id>|<external-user-id>. The
-# identifier is baked into the runner role's name in Namazu's account
-# (cosell-agent-<identifier>-<workspace>, created by Namazu's terraform)
-# — that runner is the ONLY principal for that user; the external user
-# id is the sts:SourceIdentity their sessions must present; the
-# workspace id ties it to their Namazu Cloud deployment. Zero users =
-# the role authorizes nobody (the trust is the deny-all).
-
-EXTUSER_RE='^[A-Za-z0-9_+=,.@-]{2,64}$'
+# parameter: <identifier>|<workspace-id>. The identifier is the user's
+# org-internal notation (recommended: first initial + last name, e.g.
+# jsmith) and does double duty: it is baked into the runner role name
+# to be provisioned by Namazu Studios (cosell-agent-<identifier>-
+# <workspace> — their ONLY principal) AND it is the sts:SourceIdentity
+# their sessions must present, the id both sides attribute their
+# actions to. The workspace id ties it to their Namazu Cloud
+# deployment. Zero users = the role authorizes nobody (deny-all).
 
 # Current user entries from the snapshot, one per line (empty = none).
 current_users() {
@@ -385,17 +389,18 @@ current_users() {
 }
 
 # The runner ARN for an entry — the expected principal in Namazu's
-# account (created by Namazu's terraform with this deterministic name).
+# account, to be provisioned by Namazu Studios with this deterministic
+# name.
 runner_arn_of() { # $1 = identifier, $2 = workspace
   echo "arn:aws:iam::${NAMAZU_ACCOUNT}:role/cosell-agent-$1-$2"
 }
 
 # One entry, rendered for display.
-render_user() { # $1 = entry <identifier>|<workspace>|<external-user-id>
-  local id ws src
-  IFS='|' read -r id ws src <<< "$1"
+render_user() { # $1 = entry <identifier>|<workspace-id>
+  local id ws
+  IFS='|' read -r id ws <<< "$1"
   echo "  $(runner_arn_of "$id" "$ws")"
-  echo "      identifier: $id   workspace: $ws   source identity: $src"
+  echo "      identifier/source identity: $id   workspace: $ws"
 }
 
 list_users_entries() {
@@ -408,44 +413,13 @@ list_users_entries() {
   [[ "$n" -eq 0 ]] && echo "  (none — the trust denies everyone; option 2 adds users)"
 }
 
-# Validate <identifier>|<workspace-id>|<external-user-id> input
-# (comma-separated entries). Echoes the valid entries, one per line;
-# dies on any invalid one. $1 = input, $2 = existing entries (for
-# duplicate-workspace and duplicate-identity checks).
-parse_user_entries() { # $1 = prompt input, $2 = existing comma-joined entries
-  local entry id ws src existing="${2:-}" seen_ws="" seen_src=""
-  local -a raw=()
-  IFS=',' read -ra raw <<< "$1"
-  for entry in ${raw[@]+"${raw[@]}"}; do
-    [[ -n "$entry" ]] || continue
-    IFS='|' read -r id ws src <<< "$entry"
-    [[ -n "$id" && -n "$ws" && -n "$src" && "$entry" == *"|"* ]] \
-      || die "each user must be <identifier>|<workspace-id>|<external-user-id>: $entry"
-    [[ "$id" =~ $UNAME_RE ]] \
-      || die "identifier '$id': 2-20 characters, letters/digits/_+=,.@- only (20 is the runner-name budget on the Namazu side)"
-    [[ "$ws" =~ $WS_RE ]] \
-      || die "workspace id '$ws': must be the 24-hex id shown for their workspace in Namazu Cloud"
-    [[ "$src" =~ $EXTUSER_RE ]] \
-      || die "external user id '$src': 2-64 characters, letters/digits/_+=,.@- only (it is the sts:SourceIdentity)"
-    [[ ",$seen_ws," != *",$ws,"* ]] \
-      || die "workspace $ws appears twice — one runner per workspace"
-    [[ ",$seen_src," != *",$src,"* ]] \
-      || die "external user id '$src' appears twice — one identity per user"
-    [[ ",$existing," != *",$entry,"* ]] \
-      || die "user already present: $entry"
-    seen_ws="${seen_ws:+$seen_ws,}$ws"
-    seen_src="${seen_src:+$seen_src,}$src"
-    echo "$entry"
-  done
-}
-
 # The complete trust policy JSON for a user list: one Allow statement
-# per user (their runner as Principal; their external user id as
-# sts:SourceIdentity; the stack's ExternalId; the
-# '<external-user-id>-session' RoleSessionName pin when $2 is true).
-# Empty list renders the fail-closed deny-all.
+# per user (their runner as Principal; their identifier as the
+# sts:SourceIdentity; the stack's ExternalId; the '<identifier>-session'
+# RoleSessionName pin when $2 is true). Empty list renders the
+# fail-closed deny-all.
 compose_trust() { # $1 = comma-joined entries, $2 = EnforceSessionName true/false
-  local joined="${1:-}" pin="${2:-false}" stmts="" first=1 e id ws src arn cond stmt
+  local joined="${1:-}" pin="${2:-false}" stmts="" first=1 e id ws arn cond stmt
   [[ "$joined" == "None" ]] && joined=""
   if [[ -z "$joined" ]]; then
     echo '{"Version":"2012-10-17","Statement":[{"Sid":"NobodyAuthorizedYet","Effect":"Deny","Principal":{"AWS":"*"},"Action":["sts:AssumeRole","sts:SetSourceIdentity"]}]}'
@@ -453,10 +427,10 @@ compose_trust() { # $1 = comma-joined entries, $2 = EnforceSessionName true/fals
   fi
   while IFS= read -r e; do
     [[ -n "$e" ]] || continue
-    IFS='|' read -r id ws src <<< "$e"
+    IFS='|' read -r id ws <<< "$e"
     arn="$(runner_arn_of "$id" "$ws")"
-    cond="{\"sts:SourceIdentity\":\"${src}\",\"sts:ExternalId\":\"$(snap_param ExternalId)\""
-    [[ "$pin" == "true" ]] && cond="${cond},\"sts:RoleSessionName\":\"${src}-session\""
+    cond="{\"sts:SourceIdentity\":\"${id}\",\"sts:ExternalId\":\"$(snap_param ExternalId)\""
+    [[ "$pin" == "true" ]] && cond="${cond},\"sts:RoleSessionName\":\"${id}-session\""
     cond="${cond}}"
     stmt="{\"Effect\":\"Allow\",\"Principal\":{\"AWS\":\"${arn}\"},\"Action\":[\"sts:AssumeRole\",\"sts:SetSourceIdentity\"],\"Condition\":{\"StringEquals\":${cond}}}"
     [[ $first -eq 1 ]] && stmts="$stmt" || stmts="${stmts},${stmt}"
@@ -465,35 +439,59 @@ compose_trust() { # $1 = comma-joined entries, $2 = EnforceSessionName true/fals
   echo "{\"Version\":\"2012-10-17\",\"Statement\":[${stmts}]}"
 }
 
-# The add operation: just adds. Prompt for user entries, merge into the
-# list, redeploy (the trust is recomposed from the list).
+# The add operation: just adds. Two questions per user, one at a time;
+# the identifier does double duty (runner-name label + SourceIdentity).
 add_user() {
   updatable_stack || return 1
-  local existing input e
+  local existing
   existing="$(snap_param Users)"
   [[ -z "$existing" || "$existing" == "None" ]] && existing=""
   say "current users:"
   list_users_entries
-  say "user to add — the four facts, as one entry:
-    <identifier>|<workspace-id>|<external-user-id>
-  identifier        short descriptive label; baked into the runner role
-                    name in Namazu's account (cosell-agent-<identifier>-
-                    <workspace>, created by their terraform). 2-20 chars,
-                    letters/digits/_+=,.@-.
-  workspace id      the 24-hex id of their workspace in Namazu Cloud.
-  external user id  the sts:SourceIdentity their sessions must present —
-                    the id both sides attribute their actions to.
-                    2-64 chars, same charset.
-  (comma-separate several entries; the trust gains one Allow statement
-  per user — their runner principal + their identity + the ExternalId.)"
-  input=""
-  read -r -p "user entries to add (blank: cancel): " input || true
-  [[ -n "$input" ]] || { echo "aborted"; return 0; }
-  local -a new_entries=() all_entries=()
-  while IFS= read -r e; do
-    [[ -n "$e" ]] && new_entries+=("$e")
-  done < <(parse_user_entries "$input" "$existing")
-  [[ ${#new_entries[@]} -gt 0 ]] || die "no valid user entries given"
+
+  local -a new_entries=()
+  local id ws v e
+  say "adding a user — two questions, one at a time."
+  while true; do
+    # 1) identifier — the org-internal notation; double duty.
+    id=""
+    while true; do
+      read -r -p "  identifier — the user's org-internal notation, e.g. first initial + last name like jsmith (blank: stop): " id || true
+      [[ -z "$id" ]] && break 2
+      [[ "$id" =~ $UNAME_RE ]] && break
+      echo "    invalid: 2-20 characters, letters/digits/_+=,.@- only"
+    done
+    # 2) workspace id — the Namazu Cloud workspace.
+    ws=""
+    while true; do
+      read -r -p "  workspace id — the 24-hex id of their workspace in Namazu Cloud (e.g. 6aea0e8a904eac104fa708f1): " ws || true
+      if [[ ! "$ws" =~ $WS_RE ]]; then
+        echo "    invalid: exactly 24 hex characters — the id shown for their workspace in Namazu Cloud"
+        continue
+      fi
+      local dup=0
+      while IFS= read -r e; do [[ "$e" == *"|$ws" ]] && dup=1; done < <(current_users)
+      for e in ${new_entries[@]+"${new_entries[@]}"}; do [[ "$e" == *"|$ws" ]] && dup=1; done
+      if [[ "$dup" == 1 ]]; then
+        echo "    workspace $ws already has a user — one user per workspace"
+        continue
+      fi
+      break
+    done
+    say "  this user:
+    identifier:  $id
+      baked into the runner role name to be provisioned by Namazu
+      Studios (their ONLY principal):
+        $(runner_arn_of "$id" "$ws")
+      and it is the sts:SourceIdentity their agent sessions must
+      present — the id both sides attribute their actions to."
+    new_entries+=("$id|$ws")
+    read -r -p "  add another user? (y/N): " v || true
+    [[ "$v" == "y" || "$v" == "Y" ]] || break
+  done
+  [[ ${#new_entries[@]} -gt 0 ]] || { echo "aborted"; return 0; }
+
+  local -a all_entries=()
   while IFS= read -r e; do all_entries+=("$e"); done < <(current_users)
   for e in ${new_entries[@]+"${new_entries[@]}"}; do all_entries+=("$e"); done
   local joined
@@ -505,9 +503,9 @@ add_user() {
   if deploy_with_overrides "Users=$joined" \
      && snapshot_stack \
      && [[ "$(snap_status)" == *_COMPLETE ]]; then
-    say "done. each user's runner may now assume — presenting THEIR source
-  identity and the external ID. The report below is the exact
-  configuration Namazu needs."
+    say "done. each user's runner may now assume — presenting their
+  identifier as the source identity plus the external ID. The report
+  below is the exact configuration Namazu needs."
     print_ticket_report
   else
     echo "deploy failed"; events_hint; return 1
@@ -536,9 +534,9 @@ remove_user() {
   local i=1 u
   for u in ${entries[@]+"${entries[@]}"}; do
     echo "  $i) $(render_user "$u" | head -1)"
-    local id ws src
-    IFS='|' read -r id ws src <<< "$u"
-    echo "      identifier: $id   workspace: $ws   source identity: $src"
+    local id ws
+    IFS='|' read -r id ws <<< "$u"
+    echo "      identifier/source identity: $id   workspace: $ws"
     i=$((i+1))
   done
   read -r -p "remove which (number): " pick || true
@@ -747,21 +745,29 @@ THE MODEL
    step 3  the script prints the ticket report: hand the external ID
            and the role ARN to your Namazu contact when ready.
 
-2) ADD A USER
-   step 1  give one or more entries, comma-separated (see FIELD
-           REFERENCE):
-             <identifier>|<workspace-id>|<external-user-id>
-           The identifier is baked into the runner role's name in
-           Namazu's account (cosell-agent-<identifier>-<workspace>,
-           created by their terraform) — that runner becomes the ONLY
-           principal for that user, and their external user id becomes
-           the sts:SourceIdentity their sessions must present. You
-           never paste an ARN.
-   step 2  confirm. The stack is UPDATED — the script composes one
-           Allow statement per user into the role's trust (runner +
-           identity + the external ID); every other parameter is
-           re-passed unchanged. Their runner can assume immediately.
-   step 3  the script prints the ticket report — the exact
+2) ADD A USER (two questions, one at a time)
+   step 1  the identifier — the user's ORG-INTERNAL NOTATION for this
+           user: we recommend first initial + last name (e.g. jsmith).
+           It does double duty: it is baked into the runner role name
+           to be provisioned by Namazu Studios
+           (cosell-agent-<identifier>-<workspace> — that runner becomes
+           the ONLY principal for the user) AND it is the
+           sts:SourceIdentity their agent sessions must present — the
+           id both sides attribute that user's actions to. 2-20
+           characters, letters/digits/_+=,.@- only. You never paste an
+           ARN.
+   step 2  the workspace id — exactly 24 hex characters: the id of
+           their workspace in Namazu Cloud (e.g.
+           6aea0e8a904eac104fa708f1). One user per workspace.
+           After each user the script shows their entry + the runner
+           ARN, and offers to add another; blank at the identifier
+           stops.
+   step 3  confirm. The stack is UPDATED — the script composes one
+           Allow statement per user into the role's trust (their
+           runner + their identifier as the source identity + the
+           external ID); every other parameter is re-passed unchanged.
+           Their runner can assume immediately.
+   step 4  the script prints the ticket report — the exact
            configuration Namazu needs (the agent_apn entry per user).
 
 3) LIST THE STATE
@@ -818,16 +824,16 @@ THE MODEL
    fresh external ID and re-adding principals.
 
 FIELD REFERENCE
-  user entry    <identifier>|<workspace-id>|<external-user-id> — the
-                four facts of one user. identifier: short descriptive
-                label, 2-20 chars (letters/digits/_+=,.@-), baked into
-                the runner role's name in Namazu's account. workspace
-                id: the 24-hex id of their workspace in Namazu Cloud.
-                external user id: 2-64 chars (same charset) — the
-                sts:SourceIdentity their sessions must present, the id
-                both sides attribute their actions to. Options 2/4 add
-                and remove them; the trust gains/loses one Allow
-                statement per user.
+  user entry    <identifier>|<workspace-id> — one user. identifier:
+                the org-internal notation for the user (recommended:
+                first initial + last name, e.g. jsmith), 2-20 chars
+                (letters/digits/_+=,.@-); it is baked into the runner
+                role name to be provisioned by Namazu Studios AND it
+                is the sts:SourceIdentity their sessions present.
+                workspace id: exactly 24 hex characters — their
+                workspace in Namazu Cloud. Options 2/4 add and remove
+                them; the trust gains/loses one Allow statement per
+                user.
   external ID  REQUIRED shared secret for assume-role (2+ chars,
                same charset) — confused-deputy protection. The create
                flow generates a random one by default or takes yours;
@@ -839,9 +845,8 @@ FIELD REFERENCE
   motions      'true'/'false' toggles for outbound engagement
                (option 7) and alliance connections (option 8).
   session pin  forces each user's sessions to be named
-               '<external-user-id>-session' (set session-pin=true).
-               Enable only if the Namazu side configures session
-               names.
+               '<identifier>-session' (set session-pin=true). Enable
+               only if the Namazu side configures session names.
 
 CLI FLAGS
   --stack-name    manage a different stack (default

@@ -46,19 +46,23 @@ account, 308044622771) assume roles in YOUR account — cross-account, with
 no credentials ever shared:
 
 1. You created your workspace(s) in Namazu Cloud — you know their ids.
-   Each workspace's agent runs under a dedicated runner role created by
-   Namazu's terraform, named deterministically
+   Each workspace's agent runs under a dedicated runner role to be
+   provisioned by Namazu Studios, named deterministically
    `arn:aws:iam::308044622771:role/cosell-agent-<identifier>-<workspace-id>`
    — so the interactive manager CONSTRUCTS the principal from what you
    enter; you never paste an ARN.
 2. You create the stack in YOUR account (option 1, one shot): the role
    exists immediately with its trust an explicit deny — nobody may
-   assume. Adding a user (option 2) specifies the four facts —
-   identifier (baked into the runner role's name), workspace id, the
-   external user id (their `sts:SourceIdentity`, the id both sides
-   attribute their actions to), and thereby the expected principal —
-   and the script composes one Allow statement per user into the role's
-   trust. Removing a user (option 4) drops their statement instantly.
+   assume. Adding a user (option 2) asks two questions, one at a time:
+   the **identifier** — the user's org-internal notation (recommended:
+   first initial + last name, e.g. `jsmith`), which does double duty
+   (baked into the runner role name to be provisioned by Namazu
+   Studios, `cosell-agent-<identifier>-<workspace>` — their only
+   principal — AND their `sts:SourceIdentity`, the id both sides
+   attribute their actions to) — and the **workspace id** (exactly 24
+   hex characters, their workspace in Namazu Cloud). The script
+   composes one Allow statement per user into the role's trust.
+   Removing a user (option 4) drops their statement instantly.
 3. You send the ticket report the script prints after adding: the exact
    configuration Namazu needs — the external ID, the role ARN, and one
    agent_apn entry per user (workspace, identifier, source identity).
@@ -101,11 +105,14 @@ create: it asks nothing but the confirm (the external ID is generated,
 or supply it with `--external-id`; the catalog defaults to Sandbox) and
 deploys the role with its trust authorizing **nobody** — an explicit
 deny for every principal; there is no account-root trust anywhere.
-Options 2 and 4 add and remove users — each entry
-`<identifier>|<workspace-id>|<external-user-id>` becomes one Allow
-statement in the trust: the runner role Namazu's terraform created for
-that workspace (constructed — you never paste an ARN), presenting that
-user's `sts:SourceIdentity`. Options 5-8 flip the capability gates,
+Options 2 and 4 add and remove users — two questions per user, one at
+a time: the identifier (their org-internal notation, e.g. `jsmith` —
+baked into the runner role name to be provisioned by Namazu Studios
+AND the `sts:SourceIdentity` they present) and their workspace id. Each
+user becomes one Allow statement in the trust: the runner role
+Namazu Studios provisions for that workspace (constructed — you never
+paste an ARN), presenting their identifier. Options 5-8 flip the
+capability gates,
 option 9 prints the ticket report, and option 0 deletes the stack —
 **the role goes with it** (no retain: all access stops immediately).
 The menu's help option (`h`) walks through every task step by step

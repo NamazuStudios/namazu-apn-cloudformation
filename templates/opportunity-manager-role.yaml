@@ -3,13 +3,14 @@ Description: >
   Namazu co-selling agent access: ONE role — the well-known
   Namazu-CoSell-Opportunity-Manager — in this account, created and
   destroyed by this stack. It may be assumed by ZERO OR MORE principals
-  from Namazu's account: one per user, each entry pairing the runner
-  role Namazu's terraform creates for their workspace
-  (cosell-agent-<identifier>-<workspace>) with THEIR external user id as
-  the sts:SourceIdentity — so every action lands in CloudTrail
-  attributable to that one person. Zero users = the trust is an explicit
-  deny for every principal. The interactive manager (manage-access.sh)
-  composes the trust from the user list; hand-editing is not expected.
+  from Namazu's account: one per user — the runner role to be
+  provisioned by Namazu Studios for their workspace
+  (cosell-agent-<identifier>-<workspace>), assumable only when
+  presenting that user's identifier as the sts:SourceIdentity — so
+  every action lands in CloudTrail attributable to that one person.
+  Zero users = the trust is an explicit deny for every principal. The
+  interactive manager (manage-access.sh) composes the trust from the
+  user list; hand-editing is not expected.
 
 Parameters:
   RoleName:
@@ -29,16 +30,17 @@ Parameters:
     Default: ''
     Description: >
       The users who may operate the agent — zero or more entries, each
-      <identifier>|<workspace-id>|<external-user-id>:
-      identifier — a short descriptive label that gets baked into the
-      runner role's name in Namazu's account (cosell-agent-<identifier>-
-      <workspace>, created by Namazu's terraform — the principal this
-      role trusts for that user);
-      workspace-id — the 24-hex id of their workspace in Namazu Cloud;
-      external-user-id — the sts:SourceIdentity their sessions must
-      present: the id both sides attribute that user's actions to
-      (defined by the operator of the script, 2-64 characters, letters/
-      digits/_+=,.@- only).
+      <identifier>|<workspace-id>:
+      identifier — the user's org-internal notation (recommended: first
+      initial + last name, e.g. jsmith), 2-20 characters, letters/
+      digits/_+=,.@- only. It does double duty: it is baked into the
+      runner role name to be provisioned by Namazu Studios
+      (cosell-agent-<identifier>-<workspace> — the principal this role
+      trusts for that user) AND it is the sts:SourceIdentity their
+      sessions must present, the id both sides attribute that user's
+      actions to.
+      workspace-id — exactly 24 hex characters: the id of their
+      workspace in Namazu Cloud.
       Managed by the interactive script (options 2/4), which composes
       TrustPolicy from this list. Empty = nobody authorized.
   TrustPolicy:
@@ -48,13 +50,13 @@ Parameters:
       The complete trust policy JSON, composed from Users by the
       interactive script: one Allow statement per user — Principal is
       their runner role (arn:aws:iam::<namazu-account>:role/
-      cosell-agent-<identifier>-<workspace>, created by Namazu's
-      terraform), the Condition requires their external-user-id as the
+      cosell-agent-<identifier>-<workspace>, to be provisioned by
+      Namazu Studios), the Condition requires their identifier as the
       sts:SourceIdentity plus this stack's ExternalId (and the
-      '<external-user-id>-session' RoleSessionName pin when
-      EnforceSessionName is on). The default is the fail-closed
-      deny-all for an empty user list. The script writes this together
-      with Users on every add/remove; hand-editing is not expected.
+      '<identifier>-session' RoleSessionName pin when EnforceSessionName
+      is on). The default is the fail-closed deny-all for an empty user
+      list. The script writes this together with Users on every
+      add/remove; hand-editing is not expected.
   ExternalId:
     Type: String
     Description: >
@@ -70,7 +72,7 @@ Parameters:
     AllowedValues: ['true', 'false']
     Description: >
       When true, each user's trust statement additionally pins the
-      assume-role session name to '<external-user-id>-session'. The
+      assume-role session name to '<identifier>-session'. The
       agent deployment must then use the matching session name per
       user. Leave false unless asked. (The script folds this into the
       composed TrustPolicy.)
