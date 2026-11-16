@@ -97,13 +97,16 @@ Usage: ./manage-access.sh [--stack-name NAME] [--region REGION]
                  (the one-shot create generates a random 32-char secret
                  unless this is given)
 
-Menu: create the access stack (the role exists; its trust authorizes
-nobody), add/remove users (two questions per user — their identifier
-(org-internal notation, e.g. jsmith: baked into the runner role name
-to be provisioned by Namazu Studios AND the SourceIdentity they
-present) and their workspace id — one trust statement each), flip
-the capability gates, print the ticket report to send Namazu, or
-delete the stack (the role goes with it). In the menu, 'h' shows a detailed help.
+Menu (fdisk semantics — actions stage, 'w' writes in ONE update):
+create the access stack (the role exists; its trust authorizes
+nobody), add/remove users (two questions per user: the identifier —
+baked into the runner role name to be provisioned by Namazu Studios
+and the SourceIdentity they present — and their workspace id), flip
+the capability gates; all of it is staged in memory — no deploy waits.
+'w' writes everything in ONE update after a summary of the changes to
+be applied; 'q' quits without writing. The report prints after create
+and after any write that changed users; deleting the stack destroys
+the role. In the menu, 'h' shows a detailed help.
 
 Requires: bash, the AWS CLI, and credentials for the AWS account linked
 to your Partner Central account. Deploys
@@ -278,6 +281,10 @@ print_ticket_report() {
     return 1
   fi
   extid="$(snap_param ExternalId)"
+  if [[ "$(pending_count)" -gt 0 ]]; then
+    say "NOTE: staged, unwritten changes exist — this report shows the
+  APPLIED state only. Write them ('w' in the menu) before sending."
+  fi
   local bar e id ws g
   bar="$(printf '%0.s─' $(seq 1 64))"
 
@@ -462,6 +469,104 @@ compose_trust() { # $1 = comma-joined entries, $2 = EnforceSessionName true/fals
   echo "{\"Version\":\"2012-10-17\",\"Statement\":[${stmts}]}"
 }
 
+# ---- staged changes (fdisk semantics) -----------------------------------------
+# Menu actions edit an IN-MEMORY staged set — instant, nothing deploys.
+# 'w' (write) applies everything staged in ONE update, after a summary
+# of the changes to be applied; 'q' quits WITHOUT writing (staged
+# changes are discarded after a confirm). A failed write KEEPS the
+# staging: fix the offending entry (option 4 unstages, option 2
+# re-adds) and write again.
+PENDING_ADD=(); PENDING_REMOVE=(); PENDING_PARAMS=()
+
+pending_count() { echo $(( ${#PENDING_ADD[@]} + ${#PENDING_REMOVE[@]} + ${#PENDING_PARAMS[@]} )); }
+
+# The would-be Users value: applied list minus staged removals plus
+# staged adds (comma-joined).
+merged_users() {
+  local -a out=(); local e skip
+  while IFS= read -r e; do
+    [[ -n "$e" ]] || continue
+    skip=0
+    for r in ${PENDING_REMOVE[@]+"${PENDING_REMOVE[@]}"}; do [[ "$e" == "$r" ]] && skip=1; done
+    [[ "$skip" == 0 ]] && out+=("$e")
+  done < <(current_users)
+  for a in ${PENDING_ADD[@]+"${PENDING_ADD[@]}"}; do out+=("$a"); done
+  printf '%s\n' ${out[@]+"${out[@]}"} | paste -sd, -
+}
+
+# The summary of changes to be applied — shown by the menu after every
+# staging action and by 'w' before the single write.
+display_pending() {
+  local n; n="$(pending_count)"
+  [[ "$n" -eq 0 ]] && return 0
+  echo "${C_Y}  ⚠ staged, not yet written ('w' writes them in ONE update):${C_0}"
+  local e p k cur
+  for e in ${PENDING_ADD[@]+"${PENDING_ADD[@]}"}; do
+    echo "${C_G}    + $e${C_0}"
+  done
+  for e in ${PENDING_REMOVE[@]+"${PENDING_REMOVE[@]}"}; do
+    echo "${C_R}    − $e${C_0}"
+  done
+  for p in ${PENDING_PARAMS[@]+"${PENDING_PARAMS[@]}"}; do
+    k="${p%%=*}"
+    cur="$(snap_param "$k")"
+    echo "    ${C_B}$k: ${cur:-<unset>} → ${p#*=}${C_0}"
+  done
+}
+
+# Stage a parameter change (replaces an earlier staging of the same key).
+stage_param() { # $1 = KEY=VALUE
+  local k="${1%%=*}" p replaced=0
+  local -a keep=()
+  for p in ${PENDING_PARAMS[@]+"${PENDING_PARAMS[@]}"}; do
+    if [[ "${p%%=*}" == "$k" ]]; then keep+=("$1"); replaced=1; else keep+=("$p"); fi
+  done
+  [[ "$replaced" == 0 ]] && keep+=("$1")
+  PENDING_PARAMS=("${keep[@]+"${keep[@]}"}")
+}
+
+# 'w' — the single write: one update carries every staged change, after
+# a full summary of what will be applied.
+apply_pending() {
+  local n; n="$(pending_count)"
+  if [[ "$n" -eq 0 ]]; then say "nothing staged — menu actions (2/4/5-8) stage changes; 'w' writes them."; return 0; fi
+  updatable_stack || return 1
+  local users_touched=0
+  [[ ${#PENDING_ADD[@]} -gt 0 || ${#PENDING_REMOVE[@]} -gt 0 ]] && users_touched=1
+  local -a overrides=("Users=$(merged_users)")
+  local p
+  for p in ${PENDING_PARAMS[@]+"${PENDING_PARAMS[@]}"}; do overrides+=("$p"); done
+  say "summary of changes to be applied (ONE update):"
+  display_pending
+  if [[ "$users_touched" == 1 ]]; then
+    say "users after the write:"
+    local u
+    while IFS= read -r u; do render_user "$u"; done < <(merged_users | tr ',' '\n')
+  fi
+  confirm "write to $STACK_NAME?" || { echo "aborted (changes stay staged)"; return 0; }
+  if deploy_with_overrides ${overrides[@]+"${overrides[@]}"} \
+     && snapshot_stack \
+     && [[ "$(snap_status)" == *_COMPLETE ]] \
+     && [[ "$(snap_status)" != *ROLLBACK* ]]; then
+    PENDING_ADD=(); PENDING_REMOVE=(); PENDING_PARAMS=()
+    say "done — the staged changes are written."
+    if [[ "$users_touched" == 1 ]]; then
+      say "the report below is the exact configuration Namazu needs."
+      print_ticket_report
+    fi
+  else
+    say "the write FAILED — CloudFormation rolled the stack back to its
+  previous state. Your staged changes are KEPT: the error below names
+  the culprit (for users: almost always an identifier that does not
+  match the runner Namazu Studios provisioned for that workspace —
+  IAM rejects unknown principals). Unstage with option 4, or re-add
+  with option 2, then 'w' again."
+    snapshot_stack # post-rollback truth
+    events_hint
+    return 1
+  fi
+}
+
 # The add operation: just adds. Two questions per user, one at a time;
 # the identifier does double duty (runner-name label + SourceIdentity).
 add_user() {
@@ -526,96 +631,55 @@ add_user() {
   done
   [[ ${#new_entries[@]} -gt 0 ]] || { echo "aborted"; return 0; }
 
-  # Deploy ONE USER AT A TIME: each user is an independent Allow
-  # statement, and IAM rejects trust principals that do not exist — a
-  # bad identifier would otherwise roll back the whole batch (observed
-  # live: one unknown principal sank every user in the update).
-  # Deploying separately means the users before a failure stay applied,
-  # and the culprit is named.
-  local -a applied=()
-  while IFS= read -r e; do applied+=("$e"); done < <(current_users)
+  # STAGED, not applied (fdisk semantics): nothing deploys here; 'w'
+  # writes all staged changes in ONE update.
+  local e
   for e in ${new_entries[@]+"${new_entries[@]}"}; do
-    applied+=("$e")
-    local j
-    j="$(printf '%s\n' ${applied[@]+"${applied[@]}"} | paste -sd, -)"
-    if deploy_with_overrides "Users=$j" \
-       && snapshot_stack \
-       && [[ "$(snap_status)" == *_COMPLETE ]] \
-       && [[ "$(snap_status)" != *ROLLBACK* ]]; then
-      echo "  applied: $e"
-    else
-      say "FAILED on this user: $e
-  Almost always the cause is the identifier: the runner role Namazu
-  Studios provisioned for that workspace has a different one (IAM
-  rejects unknown principals). Confirm the provisioned identifier
-  with your Namazu contact, then re-add this user."
-      snapshot_stack # post-rollback truth, not the pre-fail snapshot
-      say "users actually on the stack right now:"
-      list_users_entries
-      events_hint
-      return 1
-    fi
+    PENDING_ADD+=("$e")
+    echo "  staged: + $e"
   done
-  say "done. users now on the stack:"
-  local u
-  for u in ${applied[@]+"${applied[@]}"}; do render_user "$u"; done
-  say "each user's runner may now assume — presenting their identifier as
-  the source identity plus the external ID. The report below is the
-  exact configuration Namazu needs."
-  print_ticket_report
+  say "staged — NOT applied yet. Keep staging more (options 2/4/5-8), or
+  'w' to write everything in ONE update."
 }
 
-# The remove operation: just removes. Pick a user, drop the entry,
-# redeploy (the trust is recomposed without them).
+# The remove operation: just removes — from the staged set. An applied
+# user stages a removal; a staged add simply unstages. Nothing deploys.
 remove_user() {
   updatable_stack || return 1
-  local -a entries=()
+  local -a applied=() staged_adds=()
   local e pick
-  while IFS= read -r e; do
-    [[ -n "$e" ]] && entries+=("$e")
-  done < <(current_users)
-  [[ ${#entries[@]} -gt 0 ]] || {
-    say "no users in the list. The script now re-deploys to guarantee the
-  trust matches the empty list (the deny-all) — it heals any drift."
-    deploy_with_overrides "Users=" \
-      && snapshot_stack \
-      && say "done. the trust is the explicit deny (nobody authorized)." \
-      || { echo "deploy failed"; events_hint; }
-    return 0
-  }
-  say "users:"
-  local i=1 u
-  for u in ${entries[@]+"${entries[@]}"}; do
+  while IFS= read -r e; do [[ -n "$e" ]] && applied+=("$e"); done < <(current_users)
+  for e in ${PENDING_ADD[@]+"${PENDING_ADD[@]}"}; do staged_adds+=("$e"); done
+  [[ ${#applied[@]} -gt 0 || ${#staged_adds[@]} -gt 0 ]] || { say "no users — applied or staged."; return 0; }
+  say "users (applied unless marked staged):"
+  local i=1 u id ws
+  for u in ${applied[@]+"${applied[@]}"}; do
     echo "  $i) $(render_user "$u" | head -1)"
-    local id ws
+    IFS='|' read -r id ws <<< "$u"
+    echo "      identifier/source identity: $id   workspace: $ws"
+    i=$((i+1))
+  done
+  for u in ${staged_adds[@]+"${staged_adds[@]}"}; do
+    echo "  $i) $(render_user "$u" | head -1)   ${C_Y}[staged — not yet written]${C_0}"
     IFS='|' read -r id ws <<< "$u"
     echo "      identifier/source identity: $id   workspace: $ws"
     i=$((i+1))
   done
   read -r -p "remove which (number): " pick || true
-  [[ "$pick" =~ ^[0-9]+$ && "$pick" -ge 1 && "$pick" -le ${#entries[@]} ]] || die "invalid selection"
-  local victim="${entries[$((pick-1))]}"
-  local -a kept=()
-  for e in ${entries[@]+"${entries[@]}"}; do [[ "$e" != "$victim" ]] && kept+=("$e"); done
-  if [[ ${#kept[@]} -eq 0 ]]; then
-    say "removing the last user — the trust returns to the explicit deny
-  (nobody authorized). The role and its parameters stay."
-    if ! confirm "remove them?"; then echo "aborted"; return 0; fi
+  [[ "$pick" =~ ^[0-9]+$ && "$pick" -ge 1 && "$pick" -le $((i-1)) ]] || die "invalid selection"
+  local idx=$((pick-1)) victim=""
+  if [[ "$idx" -lt ${#applied[@]} ]]; then
+    victim="${applied[$idx]}"
+    PENDING_REMOVE+=("$victim")
+    say "staged for removal: − $victim
+  NOT applied yet — 'w' writes it. After the write their runner can no
+  longer assume; tell Namazu to drop the contract entry that names them."
   else
-    say "users after this change:"
-    for e in ${kept[@]+"${kept[@]}"}; do render_user "$e"; done
-    confirm "apply to $STACK_NAME?" || { echo "aborted"; return 0; }
-  fi
-  local joined
-  joined="$(printf '%s\n' ${kept[@]+"${kept[@]}"} | paste -sd, -)"
-  if deploy_with_overrides "Users=$joined" \
-     && snapshot_stack \
-     && [[ "$(snap_status)" == *_COMPLETE ]] \
-     && [[ "$(snap_status)" != *ROLLBACK* ]]; then
-    say "done. their runner can no longer assume — IAM takes effect
-  immediately. Tell Namazu to drop the contract entry that names them."
-  else
-    echo "deploy failed"; events_hint; return 1
+    victim="${staged_adds[$((idx - ${#applied[@]}))]}"
+    local -a keep=()
+    for e in ${PENDING_ADD[@]+"${PENDING_ADD[@]}"}; do [[ "$e" != "$victim" ]] && keep+=("$e"); done
+    PENDING_ADD=("${keep[@]+"${keep[@]}"}")
+    say "unstaged (it was never applied): $victim"
   fi
 }
 
@@ -710,42 +774,35 @@ list_state() {
   say "  outbound engagement [partner-initiated co-sell]: ${outbound:-<not a knob in this stack template>}"
   say "  alliance connections [partner-to-partner]:       ${alliance:-<not a knob in this stack template>}"
   say "  external ID: ${extid:-none}   session-name pin: ${sesspin:-false}"
+  display_pending
 }
 
-# change_pin — show, confirm, and redeploy one stack parameter. The
-# generic gate-changing flow: every other parameter is preserved.
+# change_pin — the gate-changing flow, fdisk style: the new value is
+# STAGED (replacing an earlier staging of the same key); 'w' writes.
 change_pin() {
   updatable_stack || return 1
   local key="$1" label="$2" choices="$3"
-  local cur
+  local cur v ok c p
   cur="$(snap_param "$key")"
+  for p in ${PENDING_PARAMS[@]+"${PENDING_PARAMS[@]}"}; do
+    [[ "${p%%=*}" == "$key" ]] && cur="${p#*=}"
+  done
   if [[ -z "$cur" ]]; then
     say "this stack's template doesn't carry $key — redeploy with the current template first."
     return 1
   fi
-  say "current $label: $cur"
+  say "current $label: $cur   (the staged value if one is pending; otherwise the stack's)"
   say "  allowed: $choices"
   confirm "change it?" || { echo "aborted"; return 0; }
-  local v=""
+  v=""
   read -r -p "new value, one of: $choices : " v || true
-  local ok=0
-  for c in $choices; do
-    [[ "$v" == "$c" ]] && ok=1
-  done
+  ok=0
+  for c in $choices; do [[ "$v" == "$c" ]] && ok=1; done
   [[ "$ok" == 1 ]] || die "value must be one of: $choices"
-  [[ "$v" == "$cur" ]] && { say "already $v — nothing to do"; return 0; }
-  confirm "redeploy $STACK_NAME with $key=$v?" || { echo "aborted"; return 0; }
-  if deploy_with_overrides "$key=$v" \
-     && snapshot_stack \
-     && [[ "$(snap_status)" == *_COMPLETE ]]; then
-    local newval
-    newval="$(snap_param "$key")"
-    say "done. $label is now: $newval"
-    say "IAM re-evaluates per request; a live agent session picks this up at its next credential refresh, about 1h. Update the agent-side hint to match. IAM decides either way."
-    say "the gates changed — tell Namazu: any report they hold shows the old gates."
-  else
-    echo "deploy failed"; events_hint; return 1
-  fi
+  [[ "$v" == "$cur" ]] && { say "already $v — nothing staged"; return 0; }
+  stage_param "$key=$v"
+  say "staged: $label: $cur → $v   (NOT applied yet — 'w' writes all
+  staged changes in ONE update)"
 }
 
 change_selling_catalog() {
@@ -765,6 +822,7 @@ change_alliance_connections() {
 }
 
 delete_stack() {
+  PENDING_ADD=(); PENDING_REMOVE=(); PENDING_PARAMS=()
   stack_exists || { echo "no stack $STACK_NAME — nothing to delete"; return 0; }
   confirm "delete stack $STACK_NAME (the role goes with it)?" || { echo "aborted"; return 0; }
   if aws cloudformation delete-stack --stack-name "$STACK_NAME" \
@@ -783,6 +841,14 @@ how this tool works, task by step
 =================================
 
 THE MODEL
+  fdisk semantics: the menu actions (2/4/5-8) edit an IN-MEMORY staged
+  set — instant, nothing deploys, no waiting. 'w' writes everything
+  staged in ONE update after showing a summary of the changes to be
+  applied; 'q' quits WITHOUT writing (staged changes are discarded
+  after a confirm). A failed write KEEPS the staging — the surfaced
+  error names the culprit; fix it (option 4 unstages, option 2
+  re-adds) and write again.
+
   Onboarding order (each step has an owner): you create the
   namespaces for your users in Namazu Cloud -> Namazu Studios adds the
   co-selling agent to them (provisioning each workspace's runner role,
@@ -822,7 +888,7 @@ THE MODEL
            paste an ARN. THE RULE: if the workspace already has a
            deployment, use the identifier already provisioned (your
            Namazu contact confirms it) — IAM rejects unknown
-           principals, so a guess that does not match fails the update.
+           principals, so a guess that does not match fails the write.
            For a new workspace, pick your org-internal notation (first
            initial + last name, e.g. jsmith) and share it with Namazu
            via the report; they provision it verbatim.
@@ -832,31 +898,32 @@ THE MODEL
            After each user the script shows their entry + the runner
            ARN, and offers to add another; blank at the identifier
            stops.
-   step 3  confirm. The stack is UPDATED — the script composes one
-           Allow statement per user into the role's trust (their
-           runner + their identifier as the source identity + the
-           external ID); every other parameter is re-passed unchanged.
-           Their runner can assume immediately.
-   step 4  the script prints the ticket report — the exact
-           configuration Namazu needs (the agent_apn entry per user).
+   step 3  the users are STAGED — nothing deploys yet. Keep staging
+           (more users, removals, gate flips), then 'w' writes
+           everything in ONE update.
 
+3) LIST THE STATE
 3) LIST THE STATE
    The stack status, the role ARN, the user list (or the
    nobody-authorized state), the catalog pins, the motion toggles, and
    the external ID / session-pin state. Read-only.
 
 4) REMOVE A USER
-   step 1  pick the user by number.
-   step 2  confirm. The script recomposes the trust without their
-           statement; their runner cannot assume immediately.
-           Removing the last user returns the role to the explicit
-           deny — the role itself stays, ready for the next user.
+   step 1  pick the user by number (applied users, then any staged
+           adds — marked). An applied user STAGES a removal; picking a
+           staged add simply unstages it (it was never applied).
+   step 2  'w' writes it. After the write their runner can no longer
+           assume; tell Namazu to drop the contract entry that names
+           them. Removing the last user returns the trust to the
+           explicit deny — the role itself stays.
 
 5) CHANGE THE SELLING CATALOG
+5) CHANGE THE SELLING CATALOG (staged)
    partnercentral-selling — opportunities, invitations, solutions.
    Enforced by IAM on the role ('Sandbox' for AWS's isolated test
    catalog, 'AWS' production, 'Both'; there is no unpinned option).
-   Every other parameter is preserved.
+   The new value is STAGED; 'w' writes it with everything else in ONE
+   update. Same for options 6-8.
 
 6) CHANGE THE FUNDING CATALOG
    partnercentral-benefits — funding applications, a real-money ask,
@@ -878,6 +945,16 @@ THE MODEL
         + connection invitations (alliance-led co-sell), partner
         reads, alliance-lead contact.
    off: default. Enforced by IAM the same way.
+
+W) WRITE STAGED CHANGES
+   Shows the summary of changes to be applied — every staged user
+   addition/removal and gate change, plus the users as they will be
+   after the write — then, on confirm, carries them ALL in ONE update.
+   On success the staging clears (and the ticket report prints when
+   users changed). On failure the stack rolls back, the actual
+   CloudFormation error is surfaced, and the staging is KEPT: fix the
+   culprit and write again. Quitting ('q') with staged changes asks
+   before discarding them.
 
 0) DELETE THE ACCESS STACK
    Deletes the stack AND the role — there is no retain; all access
@@ -1158,6 +1235,7 @@ while true; do
   echo
   echo "${C_B}Namazu co-selling agent — access manager${C_0}"
   render_dashboard
+  display_pending
   echo
   echo "  1) Create the access stack (the role exists; nobody authorized yet)."
   echo "  2) Add a user (their runner principal + source identity)."
@@ -1167,6 +1245,7 @@ while true; do
   echo "  6) Change the funding catalog (Sandbox / AWS / Both)."
   echo "  7) Toggle outbound engagement (partner-initiated co-sell)."
   echo "  8) Toggle alliance connections (partner-to-partner)."
+  echo "  w) Write staged changes (ONE update)."
   echo "  0) Delete the access stack entirely."
   echo "  h) Help — what each option does, step by step."
   echo "  q) Quit."
@@ -1180,10 +1259,17 @@ while true; do
     6) change_funding_catalog ;;
     7) change_outbound_engagement ;;
     8) change_alliance_connections ;;
+    w|W) apply_pending ;;
     0) delete_stack ;;
     h|H) show_help ;;
-    q|Q) exit 0 ;;
-    *) echo "Invalid choice — please enter 1–8, 0, h, or q." ;;
+    q|Q)
+      if [[ "$(pending_count)" -gt 0 ]]; then
+        say "there are staged, unwritten changes — quitting DISCARDS them.
+  ('w' writes them first.)"
+        confirm "discard them and quit anyway?" || continue
+      fi
+      exit 0 ;;
+    *) echo "Invalid choice — please enter 1–8, w, 0, h, or q." ;;
   esac
 done
 }
