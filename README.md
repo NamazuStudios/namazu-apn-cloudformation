@@ -45,10 +45,15 @@ templates also let the Namazu co-selling agent (running in Namazu's hosting
 account, 308044622771) assume roles in YOUR account — cross-account, with
 no credentials ever shared:
 
-1. Your Namazu contact gives you the agent's runner role ARNs — one per
-   agent workspace, named
-   `arn:aws:iam::308044622771:role/cosell-runner-<workspace-id>`
-   (the `AgentRoleArns` prompt in the interactive manager takes them).
+1. You created your workspace(s) in Namazu Cloud — you know their ids.
+   Each workspace's agent runs under a dedicated runner role named
+   `arn:aws:iam::308044622771:role/cosell-agent-<user_name>-<workspace-id>`
+   — and because the naming is deterministic, the interactive manager
+   CONSTRUCTS the ARNs from what you enter at its workspace prompt
+   (`<user_name>=<workspace-id>` pairs): you pick the user_name (anything
+   IAM-compliant, up to 20 characters — match your own company username
+   convention), the workspace id is the 24-hex id Namazu Cloud shows for
+   your instance. No ARNs need to be handed to you first.
 2. You run this stack in YOUR account with those ARNs as `AgentRoleArns`.
    The trust then pins your role to: exactly those principals, your
    person's `sts:SourceIdentity` (matched against the `AuthorizedUser`

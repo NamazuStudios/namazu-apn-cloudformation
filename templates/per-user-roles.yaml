@@ -51,7 +51,6 @@ Parameters:
     AllowedPattern: '^[A-Za-z0-9_+=,.@-]{2,30}$'
   ExternalId:
     Type: String
-    Default: ''
     Description: >
       Optional external ID for additional confused-deputy protection.
       When set, every role's trust policy additionally requires
@@ -123,14 +122,16 @@ Parameters:
     Description: >
       Optional: exact IAM role ARNs allowed to assume these roles — the
       Namazu agent's dedicated runner roles (one per agent workspace,
-      cosell-runner-<namespace> in the hosting account). When set, the
+      cosell-agent-<user_name>-<namespace> in the hosting account;
+      named deterministically from the operator-chosen user_name and
+      the workspace id, so the interactive manager can construct them).
+      When set, the
       trust lists those principals instead of the account root; the
       sts:SourceIdentity condition (each role pinned to its person)
       still applies to every principal. Leave empty for the
       cross-account customer case with account-root trust.
 
 Conditions:
-  HasExternalId: !Not [!Equals [!Ref ExternalId, '']]
   HasSessionNamePin: !Equals [!Ref EnforceSessionName, 'true']
   IsCatalogBoth: !Equals [!Ref CatalogPin, 'Both']
   IsBenefitsCatalogBoth: !Equals [!Ref BenefitsCatalogPin, 'Both']
@@ -177,7 +178,6 @@ Resources:
                   # optional ExternalId / RoleSessionName pins (a
                   # Condition map can't carry two Fn::If keys).
                   Fn::If:
-                    - HasExternalId
                     - Fn::If:
                         - HasSessionNamePin
                         - StringEquals:
@@ -187,13 +187,6 @@ Resources:
                         - StringEquals:
                             sts:SourceIdentity: !Ref User
                             sts:ExternalId: !Ref ExternalId
-                    - Fn::If:
-                        - HasSessionNamePin
-                        - StringEquals:
-                            sts:SourceIdentity: !Ref User
-                            sts:RoleSessionName: !Sub '${User}-session'
-                        - StringEquals:
-                            sts:SourceIdentity: !Ref User
           Tags:
             - Key: AuthorizedUser
               Value: !Ref User

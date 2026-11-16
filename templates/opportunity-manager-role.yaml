@@ -44,7 +44,6 @@ Parameters:
     AllowedPattern: '^[A-Za-z0-9_+=,.@-]{2,64}$'
   ExternalId:
     Type: String
-    Default: ''
     Description: >
       Optional external ID for additional confused-deputy protection. When
       set, the trust policy additionally requires sts:ExternalId to match
@@ -119,11 +118,13 @@ Parameters:
     Description: >
       Optional: exact IAM role ARNs allowed to assume this role. When
       Namazu's agent runs INSIDE this account (the same-account case —
-      its pod identity is a per-workspace IRSA role here), list those
-      roles so the trust no longer relies on the account-root principal:
-      e.g.
-      arn:aws:iam::<account>:role/bedrock-irsa-<workspace1>-us-east-1,arn:aws:iam::<account>:role/bedrock-irsa-<workspace2>-us-east-1.
-      The sts:SourceIdentity condition still applies to every principal.
+      its pod identity is a dedicated per-workspace runner role here),
+      list those roles so the trust no longer relies on the account-root
+      principal. They are named deterministically, one per workspace —
+      arn:aws:iam::<account>:role/cosell-agent-<user_name>-<workspace> —
+      so the interactive manager constructs them from the
+      <user_name>=<workspace-id> pairs you enter. The
+      sts:SourceIdentity condition still applies to every principal.
       Leave empty (the default) for the cross-account customer case,
       which trusts the account root.
   ManagedByTag:
@@ -159,7 +160,6 @@ Parameters:
       omits the tag.
 
 Conditions:
-  HasExternalId: !Not [!Equals [!Ref ExternalId, '']]
   HasSessionNamePin: !Equals [!Ref EnforceSessionName, 'true']
   IsCatalogBoth: !Equals [!Ref CatalogPin, 'Both']
   IsBenefitsCatalogBoth: !Equals [!Ref BenefitsCatalogPin, 'Both']
@@ -211,23 +211,14 @@ Resources:
               # Fn::If keys, so the presence/absence of each optional
               # condition selects one of the four literal maps).
               Fn::If:
-                - HasExternalId
-                - Fn::If:
-                    - HasSessionNamePin
-                    - StringEquals:
-                        sts:SourceIdentity: !Ref AuthorizedUser
-                        sts:ExternalId: !Ref ExternalId
-                        sts:RoleSessionName: !Sub '${AuthorizedUser}-session'
-                    - StringEquals:
-                        sts:SourceIdentity: !Ref AuthorizedUser
-                        sts:ExternalId: !Ref ExternalId
-                - Fn::If:
-                    - HasSessionNamePin
-                    - StringEquals:
-                        sts:SourceIdentity: !Ref AuthorizedUser
-                        sts:RoleSessionName: !Sub '${AuthorizedUser}-session'
-                    - StringEquals:
-                        sts:SourceIdentity: !Ref AuthorizedUser
+                - HasSessionNamePin
+                - StringEquals:
+                    sts:SourceIdentity: !Ref AuthorizedUser
+                    sts:ExternalId: !Ref ExternalId
+                    sts:RoleSessionName: !Sub '${AuthorizedUser}-session'
+                - StringEquals:
+                    sts:SourceIdentity: !Ref AuthorizedUser
+                    sts:ExternalId: !Ref ExternalId
       Tags:
         - Key: AuthorizedUser
           Value: !Ref AuthorizedUser

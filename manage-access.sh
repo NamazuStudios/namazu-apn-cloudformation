@@ -36,6 +36,22 @@ NEW_USERS=() # filled by read_users_input, consumed by create_stack/add_users
 USER_RE='^[A-Za-z0-9_+=,.@-]{2,30}$'
 EXTID_RE='^[A-Za-z0-9_+=,.@-]{2,1224}$'
 
+# Namazu's hosting account — where the per-workspace runner roles live.
+# A product constant; the customer's stack pins its trust to runners in
+# this account, named cosell-agent-<user_name>-<workspace-id>.
+NAMAZU_ACCOUNT=308044622771
+
+# The workspace half of a runner pair: the 24-hex instance/workspace id
+# Namazu Cloud shows for the tenant's deployment.
+WS_RE='^[0-9a-f]{24}$'
+
+# The user_name half: the operator-chosen tracking label. IAM charset,
+# capped at 20 characters — the addon's terraform truncates to 20
+# (substr(...,0,20)) when it names the runner, so staying within 20
+# guarantees the ARN this script constructs equals the role the addon
+# creates.
+UNAME_RE='^[A-Za-z0-9_+=,.@-]{2,20}$'
+
 die() { echo "error: $*" >&2; exit 1; }
 say() { echo; echo "$*"; }
 
@@ -236,11 +252,11 @@ ticket_entry() { # $1=note $2=consume_role_arn $3=user_name $4=source_identity
 }
 
 # The user_name half of a runner principal's role name. Runner roles
-# are named cosell-runner-<user_name>-<workspace>, the workspace being a
+# are named cosell-agent-<user_name>-<workspace>, the workspace being a
 # 24-hex id at the tail — greedy user_name capture anchored on that.
 runner_user_name() { # $1 = runner role ARN; echoes "user workspace" or nothing
   local name="${1##*/}"
-  [[ "$name" =~ ^cosell-runner-(.+)-([0-9a-f]{24})$ ]] \
+  [[ "$name" =~ ^cosell-agent-(.+)-([0-9a-f]{24})$ ]] \
     && echo "${BASH_REMATCH[1]} ${BASH_REMATCH[2]}"
 }
 
@@ -281,8 +297,9 @@ print_ticket_report() {
         echo "  <principal ${a##*/} carries no workspace — confirm with Namazu>"
       fi
     done < <(tr ',' '\n' <<< "$agents")
-    echo "  (decoded from the runner principal names — verify these are"
-    echo "   your workspaces before sending)"
+    echo "  (decoded from the runner principal names — these are the"
+    echo "   workspace pairs entered at create; verify they are your"
+    echo "   workspaces before sending)"
   else
     echo "  workspace: ______________________________________"
     echo "  (not derivable from this stack — write your Namazu Cloud"
@@ -525,24 +542,42 @@ create_stack() {
     *) die "catalog must be Sandbox, AWS, or Both" ;;
   esac
   extra+=("CatalogPin=$v")
-  say "Namazu agent principals (optional):
-  the IAM roles in Namazu's hosting account that the agent's pods
-  assume from — one per agent workspace, named
-      arn:aws:iam::308044622771:role/cosell-runner-<workspace-id>
-  Your Namazu contact provides the exact ARNs. Setting them pins the
-  trust to exactly those roles (recommended — no account-root trust);
-  the per-person SourceIdentity conditions still apply to every
-  principal. Blank keeps the account-root trust."
+  say "Namazu Cloud workspace(s):
+  the workspace(s) you created in Namazu Cloud where the co-sell
+  agent will run — one runner per workspace, named
+      arn:aws:iam::${NAMAZU_ACCOUNT}:role/cosell-agent-<user_name>-<workspace-id>
+  For each workspace, give its id and the user_name its runner should
+  carry: your choice, anything IAM-compliant — we recommend it match
+  your own company username convention so the runner reads naturally
+  in audits and CloudTrail. Namazu uses both verbatim; nothing is
+  renamed on either side. Setting them pins the trust to exactly
+  those runners (recommended — no account-root trust); the per-person
+  SourceIdentity conditions still apply to every principal. Blank
+  keeps the account-root trust.
+  format: <user_name>=<workspace-id>, comma-separated; the user_name
+  is 2-20 characters (letters/digits/_+=,.@-), the workspace id is
+  the 24-hex id shown for your instance in Namazu Cloud."
   v=""
-  read -r -p "agent role ARNs, comma-separated (blank: account-root trust): " v || true
+  read -r -p "workspace pairs <user_name>=<workspace-id> (blank: account-root trust): " v || true
   if [[ -n "$v" ]]; then
-    local r
-    local -a arn_parts=()
-    IFS=',' read -ra arn_parts <<< "$v"
-    for r in ${arn_parts[@]+"${arn_parts[@]}"}; do
-      [[ "$r" =~ ^arn:aws:iam::[0-9]{12}:role/ ]] || die "not a role ARN: $r"
+    local pair un ws seen_ws=""
+    local -a ws_pairs=() agent_arns=()
+    IFS=',' read -ra ws_pairs <<< "$v"
+    for pair in ${ws_pairs[@]+"${ws_pairs[@]}"}; do
+      un="${pair%%=*}"
+      ws="${pair#*=}"
+      [[ "$pair" == *=* && -n "$un" && "$un" != "$pair" ]] \
+        || die "each workspace entry must be <user_name>=<workspace-id>: $pair"
+      [[ "$un" =~ $UNAME_RE ]] \
+        || die "user_name '$un': 2-20 characters, letters/digits/_+=,.@- only (20 is the runner-name budget on the Namazu side)"
+      [[ "$ws" =~ $WS_RE ]] \
+        || die "workspace id '$ws': must be the 24-hex id shown for your instance in Namazu Cloud"
+      [[ ",$seen_ws," != *",$ws,"* ]] \
+        || die "workspace $ws entered twice — one runner per workspace"
+      seen_ws="${seen_ws:+$seen_ws,}$ws"
+      agent_arns+=("arn:aws:iam::${NAMAZU_ACCOUNT}:role/cosell-agent-${un}-${ws}")
     done
-    extra+=("AgentRoleArns=$v")
+    extra+=("AgentRoleArns=$(IFS=','; echo "${agent_arns[*]}")")
   fi
   say "session-name pin (optional):
   when enabled, each role only accepts sessions named '<user>-session'
@@ -769,9 +804,11 @@ THE MODEL
    step 1  make sure you are authenticated to the AWS account linked
            to your Partner Central account (shown in the header).
    step 2  enter one or more user names (see FIELD REFERENCE below).
-   step 3  optionally set an external ID, a catalog pin, and/or the
-           session-name pin (see FIELD REFERENCE). These are only
-           asked here; later edits preserve them.
+   step 3  set the external ID, the catalog pin, the Namazu Cloud
+           workspace(s) (see FIELD REFERENCE — the script constructs
+           the runner ARNs from them), and optionally the
+           session-name pin. These are only asked here; later edits
+           preserve them.
    step 4  confirm — the script deploys the stack and prints a TICKET
            REPORT: everything to hand to your Namazu contact (the
            external ID, the trusted principals, every role ARN, and the
@@ -854,9 +891,24 @@ FIELD REFERENCE
   user name     2-30 characters, letters/digits/_+=,.@-; becomes part
                 of the IAM role name, the role's AuthorizedUser tag,
                 and the sts:SourceIdentity the agent must present.
-  external ID   optional shared secret for assume-role (2+ chars,
-                same charset). Only set it with your Namazu contact's
-                agreement — misconfigured means every assume is denied.
+  workspace     <user_name>=<workspace-id> pairs, comma-separated —
+                the Namazu Cloud workspaces you created where the
+                agent will run. The user_name is YOUR choice, anything
+                IAM-compliant up to 20 characters (letters/digits/
+                _+=,.@-); we recommend it match your own company
+                username convention. The workspace id is the 24-hex id
+                shown for your instance in Namazu Cloud. The script
+                constructs each runner ARN from the pair:
+                arn:aws:iam::308044622771:role/
+                cosell-agent-<user_name>-<workspace-id> — and pins the
+                trust to exactly those. No defaults: you state every
+                pair. Blank keeps account-root trust.
+  external ID   REQUIRED shared secret for assume-role (2+ chars,
+                same charset) — confused-deputy protection. The create
+                flow generates a random one by default or takes yours;
+                share it with your Namazu contact, who wires it into
+                the deployment contract (both sides must match, or
+                every assume is denied).
   catalogs      'Sandbox', 'AWS', or 'Both' for each of selling and
                 funding (see options 5 and 6); enforced by IAM.
   motions       'true'/'false' toggles for outbound engagement
