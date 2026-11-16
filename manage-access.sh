@@ -451,7 +451,9 @@ add_user() {
 
   local -a new_entries=()
   local id ws v e
-  say "adding a user — two questions, one at a time."
+  say "adding a user — two questions, one at a time. (The README carries a
+  screenshot — namazu-cloud-workspace.png — showing where both values
+  appear in Namazu Cloud.)"
   while true; do
     # 1) identifier — the org-internal notation; double duty.
     id=""

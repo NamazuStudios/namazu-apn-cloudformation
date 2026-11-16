@@ -67,6 +67,23 @@ no credentials ever shared:
    configuration Namazu needs — the external ID, the role ARN, and one
    agent_apn entry per user (workspace, identifier, source identity).
 
+### Where to find the workspace id and the user name
+
+Both values the add-user prompt asks for come from the same place —
+your workspace's page in Namazu Cloud:
+
+![Where to find the workspace id and the user name in Namazu Cloud](namazu-cloud-workspace.png)
+
+- **workspace id** — the 24-hex identifier shown for your workspace
+  (e.g. `6aea0e8a904eac104fa708f1`). It is exactly what the add-user
+  prompt expects: 24 characters, letters `a-f` and digits only.
+- **user name** — the name Namazu Cloud shows for the user. Use it as
+  the basis for the **identifier** you enter (your org-internal
+  notation — first initial + last name, e.g. `jsmith`): it becomes part
+  of the runner role name to be provisioned by Namazu Studios and the
+  `sts:SourceIdentity` their sessions present, so pick the form you
+  want actions attributed to in CloudTrail.
+
 From then on, every action the agent takes in your account is that
 assumed role in your CloudTrail, attributed to the named person, scoped
 to the catalogs and actions your stack granted — and revocable by
