@@ -269,6 +269,28 @@ print_ticket_report() {
   echo "stack:    $STACK_NAME ($status)"
 
   echo
+  echo "NAMAZU CLOUD WORKSPACE(S) — the deployment(s) this ticket wires;"
+  echo "each id is the instance/workspace the agent runs in:"
+  if [[ -n "$agents" ]]; then
+    while IFS= read -r a; do
+      [[ -n "$a" ]] || continue
+      uw="$(runner_user_name "$a")"
+      if [[ -n "$uw" ]]; then
+        echo "  ${uw##* }   user_name: ${uw%% *}"
+      else
+        echo "  <principal ${a##*/} carries no workspace — confirm with Namazu>"
+      fi
+    done < <(tr ',' '\n' <<< "$agents")
+    echo "  (decoded from the runner principal names — verify these are"
+    echo "   your workspaces before sending)"
+  else
+    echo "  workspace: ______________________________________"
+    echo "  (not derivable from this stack — write your Namazu Cloud"
+    echo "   instance/workspace id above; your Namazu contact has it too,"
+    echo "   and the account on this ticket identifies your tenancy)"
+  fi
+
+  echo
   echo "EXTERNAL ID (secret — every assume-role must present it; any"
   echo "mismatch is a total deny):"
   echo "  ${extid:-<not set — required: redeploy with the current template>}"
@@ -812,8 +834,10 @@ THE MODEL
 
 9) PRINT THE TICKET REPORT
    Everything to send Namazu, copy-paste ready: the account/region/
-   stack, the external ID, the trusted runner principals (with the
-   user_name + workspace each serves), every role ARN with the
+   stack, the Namazu Cloud workspace(s) the ticket wires (decoded from
+   the runner principal names — or a fill-in blank when the trust is
+   account-root), the external ID, the trusted runner principals (with
+   the user_name + workspace each serves), every role ARN with the
    SourceIdentity it requires, the contract entries rendered verbatim
    in the agent_apn shape (consume_role_arn, user_name,
    source_identity, external_id, catalog), and the capability gates in

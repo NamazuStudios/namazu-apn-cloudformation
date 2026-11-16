@@ -125,13 +125,15 @@ account. Nothing else — no `jq`. The script re-passes every existing
 stack parameter on each update, so optional settings chosen at creation
 (an external ID, a catalog pin) are preserved when users are added or
 removed. After create and add-user it prints a **ticket report** —
-everything to hand to your Namazu contact in one block: the external
-ID, the trusted runner principals (with the user_name and workspace
-each serves), every role ARN, and the contract entries rendered in the
-exact shape the Namazu deployment takes (`consume_role_arn`,
-`user_name`, `source_identity`, `external_id`, `catalog`). Menu option
-9 / `./manage-access.sh ticket` reprints it on demand — after a gate
-flip, the report shows the live gates.
+everything to hand to your Namazu contact in one block: the Namazu
+Cloud workspace(s) the ticket wires (decoded from the runner principal
+names, or a fill-in blank under account-root trust so you state your
+instance id), the external ID, the trusted runner principals (with the
+user_name and workspace each serves), every role ARN, and the contract
+entries rendered in the exact shape the Namazu deployment takes
+(`consume_role_arn`, `user_name`, `source_identity`, `external_id`,
+`catalog`). Menu option 9 / `./manage-access.sh ticket` reprints it on
+demand — after a gate flip, the report shows the live gates.
 
 For the single-user shared-role model — or if you prefer not to use the
 script — the direct deploy flow follows.
