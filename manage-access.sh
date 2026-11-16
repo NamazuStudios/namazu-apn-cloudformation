@@ -775,29 +775,16 @@ render_card_from() { # $1 = state file, $2 = stack name
 }
 
 render_dashboard() {
-  # Cards render only for stacks that EXIST — a deleted or not-created
-  # stack (e.g. the per-user customer stack in an account where it isn't
-  # used) gets a one-line hint, never a card box that reads like a live
-  # gate panel.
-  local -a stacks=("$STACK_NAME")
-  local other="namazu-cosell-manager"
-  [[ "$STACK_NAME" == "namazu-cosell-manager" ]] && other="namazu-cosell-access"
-  stacks+=("$other")
-  local s ta="/tmp/opencode/mas-state-a.$$.tmp" tb="/tmp/opencode/mas-state-b.$$.tmp"
-  fetch_stack_state "${stacks[0]}" > "$ta" 2>&1 &
-  fetch_stack_state "${stacks[1]}" > "$tb" 2>&1 &
-  wait
-  local i=0
-  for s in ${stacks[@]+"${stacks[@]}"}; do
-    local f; f="$ta"; [[ $i -eq 1 ]] && f="$tb"
-    if head -1 "$f" 2>/dev/null | grep -q "^MISSING$"; then
-      echo "${C_D}· $s: not created${C_0}"
-    else
-      render_card_from "$f" "$s"
-    fi
-    i=$((i + 1))
-  done
-  rm -f "$ta" "$tb"
+  # One card: the stack being managed. There is no hardcoded "other" —
+  # the script manages exactly the stack --stack-name points at, and a
+  # not-created stack gets a one-line hint, never a card box.
+  local fetched
+  fetched="$(fetch_stack_state "$STACK_NAME")"
+  if [[ "$fetched" == "MISSING" || -z "$fetched" ]]; then
+    echo "${C_D}· $STACK_NAME: not created${C_0}"
+    return 0
+  fi
+  render_card_from <(printf '%s\n' "$fetched") "$STACK_NAME"
 }
 
 # ---- commands ----------------------------------------------------------------
@@ -827,25 +814,17 @@ cmd_status() {
 }
 
 cmd_drift() {
-  local -a stacks=("$STACK_NAME")
-  local other="namazu-cosell-manager"
-  [[ "$STACK_NAME" == "namazu-cosell-manager" ]] && other="namazu-cosell-access"
-  stacks+=("$other")
-  local s id res
-  for s in ${stacks[@]+"${stacks[@]}"}; do
-    id="$(aws cloudformation detect-stack-drift --stack-name "$s" --query 'StackDriftDetectionId' --output text 2>/dev/null)"
-    if [[ -z "$id" || "$id" == "None" ]]; then echo "$s: detection failed"; continue; fi
-    printf '%s: detecting…' "$s"
-    for i in $(seq 1 20); do
-      sleep 5
-      res="$(aws cloudformation describe-stack-drift-detection-status --stack-drift-detection-id "$id" --query 'StackDriftDetectionStatus' --output text 2>/dev/null)"
-      case "$res" in DETECTION_COMPLETE|DETECTION_FAILED) break;; esac
-    done
-    printf '\r%s: ' "$s"
-    aws cloudformation describe-stack-resource-drifts --stack-name "$s" \
-      --query 'StackResourceDrifts[0].StackResourceDriftStatus' --output text 2>/dev/null || echo "n/a"
+  local s="$STACK_NAME" id res
+  id="$(aws cloudformation detect-stack-drift --stack-name "$s" --query 'StackDriftDetectionId' --output text 2>/dev/null)"
+  if [[ -z "$id" || "$id" == "None" ]]; then echo "$s: detection failed"; return 1; fi
+  printf '%s: detecting…' "$s"
+  for i in $(seq 1 20); do
+    sleep 5
+    res="$(aws cloudformation describe-stack-drift-detection-status --stack-drift-detection-id "$id" --query 'StackDriftDetectionStatus' --output text 2>/dev/null)"
+    case "$res" in DETECTION_COMPLETE|DETECTION_FAILED) break;; esac
   done
-  echo "(the dashboard shows drift from the last detection)"
+  printf '\r%s: ' "$s"
+  aws cloudformation describe-stack-resource-drifts --stack-name "$s"     --query 'StackResourceDrifts[0].StackResourceDriftStatus' --output text 2>/dev/null || echo "n/a"
 }
 
 cmd_set() {
