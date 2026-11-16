@@ -49,23 +49,28 @@ no credentials ever shared:
    Each workspace's agent runs under a dedicated runner role named
    `arn:aws:iam::308044622771:role/cosell-agent-<user_name>-<workspace-id>`
    — and because the naming is deterministic, the interactive manager
-   CONSTRUCTS the ARNs from what you enter at its workspace prompt
-   (`<user_name>=<workspace-id>` pairs): you pick the user_name (anything
-   IAM-compliant, up to 20 characters — match your own company username
-   convention), the workspace id is the 24-hex id Namazu Cloud shows for
-   your instance. No ARNs need to be handed to you first.
-2. You run this stack in YOUR account with those ARNs as `AgentRoleArns`.
-   The trust then pins your role to: exactly those principals, your
-   person's `sts:SourceIdentity` (matched against the `AuthorizedUser`
-   tag), your chosen catalogs, and your chosen action set.
-3. You hand back the created role ARN (the script prints them). Namazu
-   points the relevant agent deployment at it.
+   CONSTRUCTS the ARNs from what you enter at its add-principals prompt
+   (option 2, `<user_name>=<workspace-id>` pairs): you pick the
+   user_name (anything IAM-compliant, up to 20 characters — match your
+   own company username convention), the workspace id is the 24-hex id
+   Namazu Cloud shows for your instance. No ARNs need to be handed to
+   you first.
+2. You create the stack in YOUR account (option 1): the role exists
+   immediately, and until principals are added its trust is an explicit
+   deny — nobody may assume. Adding the principals (option 2) pins the
+   trust to: exactly those runners, your person's `sts:SourceIdentity`
+   (matched against the `AuthorizedUser` tag), your chosen catalogs, and
+   your chosen action set. Removing one (option 4) drops it instantly.
+3. You send the ticket report the script prints (the external ID + the
+   role ARN + the principals' entries). Namazu points the relevant
+   agent deployment at the role.
 
 From then on, every action the agent takes in your account is that
 assumed role in your CloudTrail, attributed to the named person, scoped
 to the catalogs and actions your stack granted — and revocable by
-deleting the stack or the user. Nothing in your account is reachable
-except through that one assumed role.
+removing the principal or deleting the stack (the role goes with it —
+no retain). Nothing in your account is reachable except through that
+one assumed role.
 
 ## Templates
 
@@ -110,38 +115,46 @@ hand.
 
 ## Quick start: the interactive manager
 
-`manage-access.sh` manages the per-user model end to end: create the
-CloudFormation stack (option 1, first-time setup), add a user, list the
-current users with their role ARNs, list candidate user names harvested
-from classic IAM and IAM Identity Center, remove a user, or tear the
-whole stack down. The menu header shows the stack's live status, and the
-menu's help option (`h`) walks through every task step by step with a
-field reference. The candidate list is only a convenience — names are
-still validated against the 30-character role-name budget at input time:
+`manage-access.sh` manages the model end to end: **one stack, one IAM
+role, access = the principal list.** Option 1 creates the stack and the
+role with its trust authorizing **nobody** (an explicit deny for every
+principal — the fail-closed start; there is no account-root trust
+anywhere). Options 2 and 4 add and remove principals — the Namazu
+agents' per-workspace runner roles, constructed for you from
+`<user_name>=<workspace-id>` pairs, so you never paste an ARN. Options
+5-8 flip the capability gates, option 9 prints the ticket report, and
+option 0 deletes the stack — **the role goes with it** (no retain: all
+access stops immediately). The menu's help option (`h`) walks through
+every task step by step with a field reference:
 
 ```bash
-./manage-access.sh                      # menu: create / add / list / candidates / remove / delete
+./manage-access.sh                      # menu: create / add principals / list / remove / gates / report / delete
 ./manage-access.sh --region us-east-1   # or --stack-name to manage another stack
 ```
 
 Requirements: bash and the AWS CLI, authenticated as a principal allowed
 to create IAM roles in the account linked to your Partner Central
 account. Nothing else — no `jq`. The script re-passes every existing
-stack parameter on each update, so optional settings chosen at creation
-(an external ID, a catalog pin) are preserved when users are added or
-removed. After create and add-user it prints a **ticket report** —
-everything to hand to your Namazu contact in one block: the Namazu
-Cloud workspace(s) the ticket wires (decoded from the runner principal
-names, or a fill-in blank under account-root trust so you state your
-instance id), the external ID, the trusted runner principals (with the
-user_name and workspace each serves), every role ARN, and the contract
+stack parameter on each update, so settings chosen at creation (the
+external ID, the catalog pin, the session-name pin) survive every add,
+remove, and gate flip.
+
+The **ticket report** (printed after create, and on demand via option 9
+/ `./manage-access.sh ticket`) is everything to hand to your Namazu
+contact in one block: the external ID, the role ARN with the
+SourceIdentity it requires, the trusted principals and the Namazu Cloud
+workspaces they serve (or the nobody-authorized state), the contract
 entries rendered in the exact shape the Namazu deployment takes
 (`consume_role_arn`, `user_name`, `source_identity`, `external_id`,
-`catalog`). Menu option 9 / `./manage-access.sh ticket` reprints it on
-demand — after a gate flip, the report shows the live gates.
+`catalog`), and the capability gates in force. After a gate flip, the
+report shows the live gates.
 
-For the single-user shared-role model — or if you prefer not to use the
-script — the direct deploy flow follows.
+The script creates from `templates/opportunity-manager-role.yaml` (the
+shared-role model). The per-user variant (one role per person) is a
+direct deploy from `templates/per-user-roles.yaml` — the flow follows —
+and an existing per-user stack can still be managed by this script:
+pass `--stack-name` and the script detects the shape from the stack
+itself.
 
 ## Using a template
 

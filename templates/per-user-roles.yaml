@@ -120,16 +120,16 @@ Parameters:
     Type: CommaDelimitedList
     Default: ''
     Description: >
-      Optional: exact IAM role ARNs allowed to assume these roles — the
-      Namazu agent's dedicated runner roles (one per agent workspace,
+      The exact IAM role ARNs allowed to assume these roles — the Namazu
+      agent's dedicated runner roles (one per agent workspace,
       cosell-agent-<user_name>-<namespace> in the hosting account;
       named deterministically from the operator-chosen user_name and
-      the workspace id, so the interactive manager can construct them).
-      When set, the
-      trust lists those principals instead of the account root; the
-      sts:SourceIdentity condition (each role pinned to its person)
-      still applies to every principal. Leave empty for the
-      cross-account customer case with account-root trust.
+      the workspace id, so the interactive manager constructs them).
+      EMPTY is the fail-closed start: every role this stack creates
+      carries an explicit deny for all principals — nobody may assume
+      until principals are added. There is no account-root fallback.
+      The sts:SourceIdentity condition (each role pinned to its person)
+      still applies to every principal.
 
 Conditions:
   HasSessionNamePin: !Equals [!Ref EnforceSessionName, 'true']
@@ -159,34 +159,44 @@ Resources:
           AssumeRolePolicyDocument:
             Version: '2012-10-17'
             Statement:
-              - Sid: CrossAccountIdentityEnforcement
-                Effect: Allow
-                Principal:
-                  # AgentRoleArns set: exact runner principals (the
-                  # same-account case); empty: the account root, as the
-                  # cross-account customer case expects.
-                  AWS: !If
-                    - HasAgentRoleArns
-                    - !Ref AgentRoleArns
-                    - !Sub 'arn:aws:iam::${NamazuAccountId}:root'
-                Action:
-                  - sts:AssumeRole
-                  - sts:SetSourceIdentity
-                Condition:
-                  # Same shape as opportunity-manager-role.yaml's trust
-                  # condition, per user; nested Fn::If folds in the
-                  # optional ExternalId / RoleSessionName pins (a
-                  # Condition map can't carry two Fn::If keys).
-                  Fn::If:
-                    - Fn::If:
-                        - HasSessionNamePin
-                        - StringEquals:
-                            sts:SourceIdentity: !Ref User
-                            sts:ExternalId: !Ref ExternalId
-                            sts:RoleSessionName: !Sub '${User}-session'
-                        - StringEquals:
-                            sts:SourceIdentity: !Ref User
-                            sts:ExternalId: !Ref ExternalId
+              # The trust is the principal list, nothing else:
+              # AgentRoleArns set = exactly those runners may assume
+              # (with the SourceIdentity + ExternalId pins below).
+              # AgentRoleArns EMPTY = this role authorizes NOBODY — an
+              # explicit deny for every principal — until principals
+              # are added. There is no account-root fallback: the empty
+              # state is fail-closed by construction.
+              - !If
+                - HasAgentRoleArns
+                - Sid: CrossAccountIdentityEnforcement
+                  Effect: Allow
+                  Principal:
+                    AWS: !Ref AgentRoleArns
+                  Action:
+                    - sts:AssumeRole
+                    - sts:SetSourceIdentity
+                  Condition:
+                    # Same shape as opportunity-manager-role.yaml's trust
+                    # condition, per user: the ExternalId is ALWAYS
+                    # required; the only fold left is the optional
+                    # RoleSessionName pin (a Condition map can't carry
+                    # two Fn::If keys).
+                    Fn::If:
+                      - HasSessionNamePin
+                      - StringEquals:
+                          sts:SourceIdentity: !Ref User
+                          sts:ExternalId: !Ref ExternalId
+                          sts:RoleSessionName: !Sub '${User}-session'
+                      - StringEquals:
+                          sts:SourceIdentity: !Ref User
+                          sts:ExternalId: !Ref ExternalId
+                - Sid: NobodyAuthorizedYet
+                  Effect: Deny
+                  Principal:
+                    AWS: "*"
+                  Action:
+                    - sts:AssumeRole
+                    - sts:SetSourceIdentity
           Tags:
             - Key: AuthorizedUser
               Value: !Ref User

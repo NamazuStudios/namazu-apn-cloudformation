@@ -116,17 +116,17 @@ Parameters:
     Type: CommaDelimitedList
     Default: ''
     Description: >
-      Optional: exact IAM role ARNs allowed to assume this role. When
-      Namazu's agent runs INSIDE this account (the same-account case —
-      its pod identity is a dedicated per-workspace runner role here),
-      list those roles so the trust no longer relies on the account-root
-      principal. They are named deterministically, one per workspace —
-      arn:aws:iam::<account>:role/cosell-agent-<user_name>-<workspace> —
+      The exact IAM role ARNs allowed to assume this role — the Namazu
+      agent's dedicated runner roles, one per workspace, named
+      deterministically
+      (arn:aws:iam::<account>:role/cosell-agent-<user_name>-<workspace>),
       so the interactive manager constructs them from the
-      <user_name>=<workspace-id> pairs you enter. The
-      sts:SourceIdentity condition still applies to every principal.
-      Leave empty (the default) for the cross-account customer case,
-      which trusts the account root.
+      <user_name>=<workspace-id> pairs you enter (option 2 adds or
+      removes them). EMPTY is the fail-closed start: the role exists but
+      its trust is an explicit deny for every principal — nobody may
+      assume it until principals are added. There is no account-root
+      fallback. The sts:SourceIdentity condition still applies to every
+      principal.
   ManagedByTag:
     Type: String
     Default: 'namazu-apn-cloudformation'
@@ -173,11 +173,6 @@ Conditions:
 Resources:
   OpportunityManagerRole:
     Type: AWS::IAM::Role
-    # Retain on delete: this role is the customer's identity anchor for
-    # every co-selling session — deleting it would sever live access, and
-    # import (the path that brings an already-deployed role under stack
-    # management) requires an explicit DeletionPolicy.
-    DeletionPolicy: Retain
     Properties:
       RoleName: !Ref RoleName
       Description: >-
@@ -187,38 +182,44 @@ Resources:
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
-          - Sid: CrossAccountIdentityEnforcement
-            Effect: Allow
-            Principal:
-              # Same-account mode (AgentRoleArns set): trust exactly the
-              # agent pods' IRSA roles — the agent runs in this account,
-              # and a root-principal trust would let any principal in it
-              # present the source identity. Customer mode (default): the
-              # account root, as before.
-              AWS: !If
-                - HasAgentRoleArns
-                - !Ref AgentRoleArns
-                - !Sub 'arn:aws:iam::${NamazuAccountId}:root'
-            Action:
-              - sts:AssumeRole
-              - sts:SetSourceIdentity
-            Condition:
-              # The assuming session must present this exact source
-              # identity; it must equal the AuthorizedUser tag below —
-              # that match is what makes every action attributable. The
-              # optional ExternalId / RoleSessionName pins are folded in
-              # via nested Fn::If (a Condition map can't carry two
-              # Fn::If keys, so the presence/absence of each optional
-              # condition selects one of the four literal maps).
-              Fn::If:
-                - HasSessionNamePin
-                - StringEquals:
-                    sts:SourceIdentity: !Ref AuthorizedUser
-                    sts:ExternalId: !Ref ExternalId
-                    sts:RoleSessionName: !Sub '${AuthorizedUser}-session'
-                - StringEquals:
-                    sts:SourceIdentity: !Ref AuthorizedUser
-                    sts:ExternalId: !Ref ExternalId
+          # The trust is the principal list, nothing else: AgentRoleArns
+          # set = exactly those runners may assume (with the SourceIdentity
+          # + ExternalId pins below). AgentRoleArns EMPTY = the role
+          # authorizes NOBODY — an explicit deny for every principal —
+          # until principals are added via the manager script (option 2).
+          # There is no account-root fallback: the empty state is
+          # fail-closed by construction.
+          - !If
+            - HasAgentRoleArns
+            - Sid: CrossAccountIdentityEnforcement
+              Effect: Allow
+              Principal:
+                AWS: !Ref AgentRoleArns
+              Action:
+                - sts:AssumeRole
+                - sts:SetSourceIdentity
+              Condition:
+                # The assuming session must present this exact source
+                # identity; it must equal the AuthorizedUser tag below —
+                # that match is what makes every action attributable. The
+                # optional RoleSessionName pin folds in via Fn::If (a
+                # Condition map can't carry two Fn::If keys).
+                Fn::If:
+                  - HasSessionNamePin
+                  - StringEquals:
+                      sts:SourceIdentity: !Ref AuthorizedUser
+                      sts:ExternalId: !Ref ExternalId
+                      sts:RoleSessionName: !Sub '${AuthorizedUser}-session'
+                  - StringEquals:
+                      sts:SourceIdentity: !Ref AuthorizedUser
+                      sts:ExternalId: !Ref ExternalId
+            - Sid: NobodyAuthorizedYet
+              Effect: Deny
+              Principal:
+                AWS: "*"
+              Action:
+                - sts:AssumeRole
+                - sts:SetSourceIdentity
       Tags:
         - Key: AuthorizedUser
           Value: !Ref AuthorizedUser
@@ -418,8 +419,9 @@ Outputs:
   RoleArn:
     Description: >
       The role the Namazu co-selling agent assumes. Give this to your
-      Namazu contact (along with the ExternalId, if you set one) — it
-      becomes the deployment's aws.roleArn.
+      Namazu contact (along with the ExternalId) — it becomes the
+      deployment's aws.roleArn. The role exists from create; until
+      principals are added (AgentRoleArns), its trust authorizes nobody.
     Value: !GetAtt OpportunityManagerRole.Arn
   AuthorizedUser:
     Description: >

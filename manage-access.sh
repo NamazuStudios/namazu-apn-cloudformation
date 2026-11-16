@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
-# manage-access.sh — interactive manager for the Namazu co-selling agent's
-# customer-side access: creates the CloudFormation stack from
-# templates/per-user-roles.yaml (option 1, first-time setup), adds/removes
-# users, and lists them (with role ARNs) alongside candidate user names
-# harvested from classic IAM and IAM Identity Center. One stack holds every
-# user; the stack's `Users` parameter IS the user list, so add/remove is a
-# stack update and list is reading it back. After create and add-user —
-# and on demand (option 9 / the `ticket` command) — it prints a TICKET
-# REPORT: everything the operator needs to put into a support ticket for
-# Namazu (external ID, trusted principals, role ARNs, contract entries).
+# manage-access.sh — interactive manager for the Namazu co-selling
+# agent's customer-side access. THE MODEL: one CloudFormation stack, one
+# IAM role. Create (option 1) deploys templates/opportunity-manager-role.yaml
+# with the trust authorizing NOBODY (an explicit deny for every
+# principal); access is then purely the principal list — the agents'
+# per-workspace runner roles — added and removed by options 2 and 4.
+# Delete the stack and the role goes with it. Gate flips (options 5-8)
+# and the on-demand ticket report (option 9) round it out.
 #
-# The shared-role template (templates/opportunity-manager-role.yaml) is NOT
-# managed here: it is a single-user, one-off deploy for the
-# single-account-manager case — see README.md for its direct
-# `aws cloudformation deploy` flow.
+# The per-user template (templates/per-user-roles.yaml — one role per
+# person) is a direct-deploy variant for accounts that want per-person
+# attribution; see README.md. This script manages an existing per-user
+# stack passed via --stack-name (its shape is detected from the stack's
+# own parameters) — add/remove principals and gate flips apply to it
+# the same way.
 #
-# Requirements: bash + the AWS CLI, authenticated as a principal allowed to
-# create IAM roles in the AWS account linked to your Partner Central
+# Requirements: bash + the AWS CLI, authenticated as a principal allowed
+# to create IAM roles in the AWS account linked to your Partner Central
 # account. No other dependencies (no jq — parsing is done with --query).
 #
 # Usage: ./manage-access.sh [--stack-name NAME] [--region REGION]
@@ -25,15 +25,16 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TEMPLATE="$SCRIPT_DIR/templates/per-user-roles.yaml"
+# CREATE deploys the shared-role model: one role, its trust a plain
+# principal list (empty = an explicit deny for everyone — nobody
+# authorized) that options 2/4 add to and remove from. The per-user
+# template (one role per person) is deployed directly — see README —
+# and this script still manages an existing per-user stack passed via
+# --stack-name (the shape is detected from the stack's parameters).
+TEMPLATE="$SCRIPT_DIR/templates/opportunity-manager-role.yaml"
+TEMPLATE_PERUSER="$SCRIPT_DIR/templates/per-user-roles.yaml"
 STACK_NAME="namazu-cosell-manager"
-NEW_USERS=() # filled by read_users_input, consumed by create_stack/add_users
 
-# IAM role-name rules as the template enforces them (also validated
-# server-side by AllowedPattern — this is the friendly, fail-fast copy):
-# 2-30 characters, letters/digits/_+=,.@- only. 30 because the template's
-# role-name prefix takes 34 of IAM's 64.
-USER_RE='^[A-Za-z0-9_+=,.@-]{2,30}$'
 EXTID_RE='^[A-Za-z0-9_+=,.@-]{2,1224}$'
 
 # Namazu's hosting account — where the per-workspace runner roles live.
@@ -87,17 +88,18 @@ Usage: ./manage-access.sh [--stack-name NAME] [--region REGION]
   --region       AWS region for the CloudFormation calls
                  (default: your AWS CLI's configured region)
 
-Menu: create the stack, add/remove users, list current users with their
-role ARNs, list candidate user names from IAM / IAM Identity Center, or
-delete the stack. After create and add-user the script prints a ticket
-report — everything to hand to Namazu (external ID, principals, role
-ARNs, contract entries); `ticket` reprints it on demand. In the menu,
-'h' shows a detailed help: what each option does, step by step, plus a
-field reference.
+Menu: create the access stack (the role exists; its trust authorizes
+nobody), add/remove the principals that may assume it (the agents'
+runner roles, constructed from <user_name>=<workspace-id> pairs), flip
+the capability gates, print the ticket report to send Namazu, or
+delete the stack (the role goes with it). `ticket` reprints the full
+report on demand; in the menu, 'h' shows a detailed help.
 
-Requires: bash, the AWS CLI, and credentials for the AWS account linked to
-your Partner Central account. Manages templates/per-user-roles.yaml — for
-the single-user shared-role template, see README.md.
+Requires: bash, the AWS CLI, and credentials for the AWS account linked
+to your Partner Central account. Creates from
+templates/opportunity-manager-role.yaml (the shared-role model); an
+existing per-user stack deployed from templates/per-user-roles.yaml
+(see README) can be managed by passing --stack-name.
 EOF
 }
 
@@ -179,6 +181,18 @@ snap_param() { # $1 = parameter key
 # caller asks for. Without this, adding a second user (or changing the
 # catalog) would silently wipe a CatalogPin or ExternalId set at creation
 # time.
+# The template an UPDATE should deploy: the stack's own parameters say
+# which shape it is (a Users parameter = the per-user model; anything
+# else = the shared-role model). Create always deploys the shared model.
+current_template() {
+  [[ -n "$SNAP_DIR" ]] || snapshot_stack
+  if param_defined "Users"; then
+    echo "$TEMPLATE_PERUSER"
+  else
+    echo "$TEMPLATE"
+  fi
+}
+
 deploy_with_overrides() { # $@ = KEY=VALUE pairs to substitute into the snapshot
   [[ -n "$SNAP_DIR" ]] || snapshot_stack
   local -A ov=()
@@ -194,14 +208,10 @@ deploy_with_overrides() { # $@ = KEY=VALUE pairs to substitute into the snapshot
     overrides+=("$k=$v")
   done < "$SNAP_DIR/params"
   aws cloudformation deploy \
-    --template-file "$TEMPLATE" \
+    --template-file "$(current_template)" \
     --stack-name "$STACK_NAME" \
     --capabilities CAPABILITY_NAMED_IAM \
     --parameter-overrides ${overrides[@]+"${overrides[@]}"}
-}
-
-deploy_with_users() { # $1 = the new comma-separated Users value
-  deploy_with_overrides "Users=$1"
 }
 
 events_hint() {
@@ -298,13 +308,11 @@ print_ticket_report() {
       fi
     done < <(tr ',' '\n' <<< "$agents")
     echo "  (decoded from the runner principal names — these are the"
-    echo "   workspace pairs entered at create; verify they are your"
-    echo "   workspaces before sending)"
+    echo "   workspace pairs behind the principals (option 2); verify"
+    echo "   they are your workspaces before sending)"
   else
-    echo "  workspace: ______________________________________"
-    echo "  (not derivable from this stack — write your Namazu Cloud"
-    echo "   instance/workspace id above; your Namazu contact has it too,"
-    echo "   and the account on this ticket identifies your tenancy)"
+    echo "  (none yet — the workspaces come with the principals: add them"
+    echo "   with menu option 2 and the pairs carry the workspace ids)"
   fi
 
   echo
@@ -327,9 +335,9 @@ print_ticket_report() {
       fi
     done < <(tr ',' '\n' <<< "$agents")
   else
-    echo "TRUSTED PRINCIPALS: account-root trust (every principal in the"
-    echo "Namazu hosting account may try; SourceIdentity + the external ID"
-    echo "still gate every assume)."
+    echo "TRUSTED PRINCIPALS: NONE — the role's trust is an explicit deny"
+    echo "for every principal (fail-closed start). Add principals"
+    echo "(menu option 2) and re-send this report."
   fi
 
   echo
@@ -374,7 +382,8 @@ print_ticket_report() {
     done < <(tr ',' '\n' <<< "$users")
   else
     # Shared-role stack: one role, one AuthorizedUser — an entry per runner
-    # principal, each pairing the shared role with that workspace.
+    # principal, each pairing the shared role with that workspace. No
+    # principals yet = no entries: the note below says so.
     rarn="$(ticket_role_arn "")"
     if [[ -n "$agents" ]]; then
       while IFS= read -r a; do
@@ -386,9 +395,12 @@ print_ticket_report() {
           entries+=("$(ticket_entry "runner ${a##*/} (confirm the workspace with Namazu)" "$rarn" "" "$auser")")
         fi
       done < <(tr ',' '\n' <<< "$agents")
-    else
-      entries+=("$(ticket_entry "shared role, account-root trust" "$rarn" "" "$auser")")
     fi
+  fi
+  if [[ ${#entries[@]} -eq 0 ]]; then
+    echo "  (no contract entries yet — nothing to wire until principals"
+    echo "   are added (option 2); the external ID above is decided and"
+    echo "   waiting, and the role ARN is in the ROLES section)"
   fi
   printf '%s\n\n' ${entries[@]+"${entries[@]}"}
 
@@ -408,8 +420,6 @@ confirm() { # $1 = question; returns 0 on yes
   read -r -p "$1 [y/N]: " reply || true
   [[ "$reply" == "y" || "$reply" == "Y" || "$reply" == "yes" ]]
 }
-
-valid_user() { [[ "$1" =~ $USER_RE ]] ; }
 
 # Case-folded form of a name — IAM role names are not case-sensitive for
 # uniqueness, so duplicate detection compares folded.
@@ -436,34 +446,155 @@ updatable_stack() {
   esac
 }
 
-# Reads a comma- or space-separated batch of names into NEW_USERS: validated
-# against USER_RE and de-duplicated within the batch (case-insensitively —
-# two names differing only by case would collide in IAM role names anyway).
-read_users_input() {
-  local input="" u l batch_lower="" raw=()
-  NEW_USERS=()
-  say "what a user name is:
-  each name becomes its own IAM role, named
-      Namazu-CoSell-Opportunity-Manager-<name>
-  and becomes the sts:SourceIdentity every CloudTrail entry shows for
-  that person's agent sessions — so pick an identifier that matches
-  the human (their personal username, not a group or shared account).
-  rules: 2-30 characters; letters, digits, and _+=,.@- only; spaces
-  you type are treated as commas. (menu option 4 lists candidates)"
-  read -r -p "user name(s) to add (comma-separated): " input || true
-  input="${input// /,}"
-  IFS=',' read -ra raw <<< "$input"
-  for u in ${raw[@]+"${raw[@]}"}; do
-    [[ -n "$u" ]] || continue
-    valid_user "$u" || die "invalid user name '$u': 2-30 characters, letters/digits/_+=,.@- only (it becomes part of an IAM role name)"
-    l="$(lower "$u")"
-    case ",${batch_lower}," in
-      *",$l,"*) echo "  skipping '$u' — duplicate in this batch"; continue ;;
-    esac
-    batch_lower="${batch_lower:+$batch_lower,}$l"
-    NEW_USERS+=("$u")
+# ---- principal list helpers --------------------------------------------------
+# The principal list IS the access: the trust allows exactly these
+# runner ARNs (constructed from <user_name>=<workspace-id> pairs) and
+# nothing else. Empty list = the role authorizes nobody.
+
+# Current principals from the snapshot, one per line, as constructed
+# ARNs (empty output = none).
+current_principals() {
+  [[ -n "$SNAP_DIR" ]] || snapshot_stack
+  local v
+  v="$(snap_param AgentRoleArns)"
+  [[ -z "$v" || "$v" == "None" ]] && return 0
+  tr ',' '\n' <<< "$v" | sed '/^$/d'
+}
+
+# One principal, rendered for display: the decoded pair when it follows
+# the runner naming convention, else the raw ARN.
+render_principal() { # $1 = ARN
+  local uw
+  uw="$(runner_user_name "$1")"
+  if [[ -n "$uw" ]]; then
+    echo "  $1"
+    echo "      user_name: ${uw%% *}   workspace: ${uw##* }"
+  else
+    echo "  $1   (user_name/workspace: confirm with Namazu)"
+  fi
+}
+
+list_principals() {
+  local a n=0
+  while IFS= read -r a; do
+    [[ -n "$a" ]] || continue
+    n=$((n+1))
+    render_principal "$a"
+  done < <(current_principals)
+  [[ "$n" -eq 0 ]] && echo "  (none — the role's trust denies everyone; option 2 adds principals)"
+}
+
+# Validate <user_name>=<workspace-id> input (comma-separated) and echo
+# the constructed ARNs, one per line. Dies on any invalid entry.
+# $1 = existing principals (comma-joined ARNs) for duplicate checks.
+parse_principal_pairs() { # $1 = prompt input, $2 = existing ARNs
+  local pair un ws seen_ws="" existing="${2:-}"
+  local -a ws_pairs=()
+  IFS=',' read -ra ws_pairs <<< "$1"
+  for pair in ${ws_pairs[@]+"${ws_pairs[@]}"}; do
+    [[ -n "$pair" ]] || continue
+    un="${pair%%=*}"
+    ws="${pair#*=}"
+    [[ "$pair" == *=* && -n "$un" && "$un" != "$pair" ]] \
+      || die "each principal must be <user_name>=<workspace-id>: $pair"
+    [[ "$un" =~ $UNAME_RE ]] \
+      || die "user_name '$un': 2-20 characters, letters/digits/_+=,.@- only (20 is the runner-name budget on the Namazu side)"
+    [[ "$ws" =~ $WS_RE ]] \
+      || die "workspace id '$ws': must be the 24-hex id shown for your instance in Namazu Cloud"
+    [[ ",$seen_ws," != *",$ws,"* ]] \
+      || die "workspace $ws entered twice — one runner per workspace"
+    local arn="arn:aws:iam::${NAMAZU_ACCOUNT}:role/cosell-agent-${un}-${ws}"
+    [[ ",$existing," != *",$arn,"* ]] \
+      || die "principal already authorized: $arn"
+    seen_ws="${seen_ws:+$seen_ws,}$ws"
+    echo "$arn"
   done
-  [[ ${#NEW_USERS[@]} -gt 0 ]] || die "no user names given"
+}
+
+# The add operation: just adds. Prompt for pairs, merge into the list,
+# redeploy.
+add_principals() {
+  updatable_stack || return 1
+  local existing joined input
+  existing="$(current_principals | paste -sd, -)"
+  say "current principals:"
+  list_principals
+  say "principal to add:
+  the agents' runner roles — one per Namazu Cloud workspace, named
+      arn:aws:iam::${NAMAZU_ACCOUNT}:role/cosell-agent-<user_name>-<workspace-id>
+  Give the workspace id and the user_name its runner should carry:
+  your choice, anything IAM-compliant — we recommend it match your
+  own company username convention. Namazu uses both verbatim; nothing
+  is renamed on either side.
+  format: <user_name>=<workspace-id>, comma-separated; the user_name
+  is 2-20 characters (letters/digits/_+=,.@-), the workspace id is
+  the 24-hex id shown for your instance in Namazu Cloud."
+  input=""
+  read -r -p "workspace pairs to authorize (blank: cancel): " input || true
+  [[ -n "$input" ]] || { echo "aborted"; return 0; }
+  local -a new_arns=() all_arns=() a
+  while IFS= read -r a; do
+    [[ -n "$a" ]] && new_arns+=("$a")
+  done < <(parse_principal_pairs "$input" "$existing")
+  [[ ${#new_arns[@]} -gt 0 ]] || die "no valid principals given"
+  while IFS= read -r a; do all_arns+=("$a"); done < <(current_principals)
+  for a in ${new_arns[@]+"${new_arns[@]}"}; do all_arns+=("$a"); done
+  joined="$(printf '%s\n' ${all_arns[@]+"${all_arns[@]}"} | paste -sd, -)"
+  say "principals after this change:"
+  local p
+  for p in ${all_arns[@]+"${all_arns[@]}"}; do render_principal "$p"; done
+  confirm "apply to $STACK_NAME?" || { echo "aborted"; return 0; }
+  if deploy_with_overrides "AgentRoleArns=$joined" \
+     && snapshot_stack \
+     && [[ "$(snap_status)" == *_COMPLETE ]]; then
+    say "done. the trust now allows exactly the principals above — every one still needs the SourceIdentity + external ID to actually assume."
+  else
+    echo "deploy failed"; events_hint; return 1
+  fi
+}
+
+# The remove operation: just removes. Pick from the list, drop it,
+# redeploy.
+remove_principals() {
+  updatable_stack || return 1
+  local -a arns=()
+  local a n=0 pick
+  while IFS= read -r a; do
+    [[ -n "$a" ]] && arns+=("$a")
+  done < <(current_principals)
+  [[ ${#arns[@]} -gt 0 ]] || { say "no principals authorized — the role's trust already denies everyone."; return 0; }
+  say "authorized principals:"
+  local i=1
+  for a in ${arns[@]+"${arns[@]}"}; do
+    echo "  $i) $(render_principal "$a" | head -1)"
+    local uw; uw="$(runner_user_name "$a")"
+    [[ -n "$uw" ]] && echo "      user_name: ${uw%% *}   workspace: ${uw##* }"
+    i=$((i+1))
+  done
+  read -r -p "remove which (number): " pick || true
+  [[ "$pick" =~ ^[0-9]+$ && "$pick" -ge 1 && "$pick" -le ${#arns[@]} ]] || die "invalid selection"
+  local victim="${arns[$((pick-1))]}"
+  local -a kept=()
+  for a in ${arns[@]+"${arns[@]}"}; do [[ "$a" != "$victim" ]] && kept+=("$a"); done
+  if [[ ${#kept[@]} -eq 0 ]]; then
+    say "removing the last principal — the role's trust returns to the
+  explicit deny (nobody authorized). The role and its parameters stay."
+    if ! confirm "remove it?"; then echo "aborted"; return 0; fi
+  else
+    say "principals after this change:"
+    for a in ${kept[@]+"${kept[@]}"}; do render_principal "$a"; done
+    confirm "apply to $STACK_NAME?" || { echo "aborted"; return 0; }
+  fi
+  local joined
+  joined="$(printf '%s\n' ${kept[@]+"${kept[@]}"} | paste -sd, -)"
+  if deploy_with_overrides "AgentRoleArns=$joined" \
+     && snapshot_stack \
+     && [[ "$(snap_status)" == *_COMPLETE ]]; then
+    say "done. '$victim' can no longer assume; IAM takes effect immediately."
+    say "tell Namazu to drop the contract entry that names it."
+  else
+    echo "deploy failed"; events_hint; return 1
+  fi
 }
 
 # ---- preflight --------------------------------------------------------------
@@ -493,24 +624,36 @@ create_stack() {
       snapshot_stack # the deletion changed everything
     else
       say "stack $STACK_NAME already exists (status: $status) — nothing to create."
-      echo "use option 2 to add a user to it."
+      echo "use option 2 to add principals to it."
       return 0
     fi
   fi
 
-  read_users_input
-  local users_value
-  users_value="$(IFS=','; echo "${NEW_USERS[*]}")"
+  # The single decision this stack is attributed to: the person the
+  # agent sessions act as. Everything else access-related — WHO may
+  # assume — is the principal list, which starts EMPTY (the role's
+  # trust denies everyone) and is managed after create (option 2).
+  say "authorized user (the person this role is attributed to):
+  the sts:SourceIdentity every agent session must present, and what
+  CloudTrail shows for every action this role takes. Pick the human
+  (a personal username, not a group or shared account). rules: 2-64
+  characters; letters, digits, and _+=,.@- only."
+  v=""
+  read -r -p "authorized user (e.g. the account manager): " v || true
+  [[ -n "$v" ]] || die "authorized user cannot be empty"
+  [[ "$v" =~ ^[A-Za-z0-9_+=,.@-]{2,64}$ ]] \
+    || die "invalid authorized user (2-64 characters; letters/digits/_+=,.@- only)"
+  extra+=("AuthorizedUser=$v")
 
-  # First create: offer the optional hardening/pinning parameters with
-  # sensible defaults (later updates preserve whatever is chosen here).
+  # First create: offer the hardening/pinning parameters with sensible
+  # defaults (later updates preserve whatever is chosen here).
   say "external ID (required — confused-deputy protection):
-  a secret the Namazu agent must present when assuming these roles.
-  Generated per workspace by default (cryptographically random —
-  recommended); or enter your own. Either way it must be shared with
-  your Namazu contact (a support ticket works) so it lands in the
-  deployment contract — both sides must match, or every assume-role
-  is denied. rules: 2+ characters; letters, digits, and _+=,.@- only."
+  a secret the Namazu agent must present when assuming this role.
+  Generated by default (cryptographically random — recommended); or
+  enter your own. Either way it must be shared with your Namazu
+  contact (a support ticket works) so it lands in the deployment
+  contract — both sides must match, or every assume-role is denied.
+  rules: 2+ characters; letters, digits, and _+=,.@- only."
   v=""
   read -r -p "external ID — [g]enerate a random one, [e]nter your own, [Enter]=generate: " v || true
   case "$v" in
@@ -530,10 +673,10 @@ create_stack() {
   Partner Central has two catalogs: 'Sandbox' (AWS's isolated test
   catalog — placeholder data, safe to exercise against) and 'AWS'
   (production — real opportunities and engagement invitations). The
-  choice is enforced by IAM: every role in this stack gets a condition
-  limiting it to the chosen catalog. 'Both' grants both catalogs —
-  only for moving to production co-sell work. There is no unpinned
-  option: an operator always chooses. default: Sandbox."
+  choice is enforced by IAM: the role gets a condition limiting it to
+  the chosen catalog. 'Both' grants both catalogs — only for moving to
+  production co-sell work. There is no unpinned option: an operator
+  always chooses. default: Sandbox."
   v=""
   read -r -p "catalog — Sandbox, AWS, or Both (Sandbox): " v || true
   v="${v:-Sandbox}"
@@ -542,56 +685,21 @@ create_stack() {
     *) die "catalog must be Sandbox, AWS, or Both" ;;
   esac
   extra+=("CatalogPin=$v")
-  say "Namazu Cloud workspace(s):
-  the workspace(s) you created in Namazu Cloud where the co-sell
-  agent will run — one runner per workspace, named
-      arn:aws:iam::${NAMAZU_ACCOUNT}:role/cosell-agent-<user_name>-<workspace-id>
-  For each workspace, give its id and the user_name its runner should
-  carry: your choice, anything IAM-compliant — we recommend it match
-  your own company username convention so the runner reads naturally
-  in audits and CloudTrail. Namazu uses both verbatim; nothing is
-  renamed on either side. Setting them pins the trust to exactly
-  those runners (recommended — no account-root trust); the per-person
-  SourceIdentity conditions still apply to every principal. Blank
-  keeps the account-root trust.
-  format: <user_name>=<workspace-id>, comma-separated; the user_name
-  is 2-20 characters (letters/digits/_+=,.@-), the workspace id is
-  the 24-hex id shown for your instance in Namazu Cloud."
-  v=""
-  read -r -p "workspace pairs <user_name>=<workspace-id> (blank: account-root trust): " v || true
-  if [[ -n "$v" ]]; then
-    local pair un ws seen_ws=""
-    local -a ws_pairs=() agent_arns=()
-    IFS=',' read -ra ws_pairs <<< "$v"
-    for pair in ${ws_pairs[@]+"${ws_pairs[@]}"}; do
-      un="${pair%%=*}"
-      ws="${pair#*=}"
-      [[ "$pair" == *=* && -n "$un" && "$un" != "$pair" ]] \
-        || die "each workspace entry must be <user_name>=<workspace-id>: $pair"
-      [[ "$un" =~ $UNAME_RE ]] \
-        || die "user_name '$un': 2-20 characters, letters/digits/_+=,.@- only (20 is the runner-name budget on the Namazu side)"
-      [[ "$ws" =~ $WS_RE ]] \
-        || die "workspace id '$ws': must be the 24-hex id shown for your instance in Namazu Cloud"
-      [[ ",$seen_ws," != *",$ws,"* ]] \
-        || die "workspace $ws entered twice — one runner per workspace"
-      seen_ws="${seen_ws:+$seen_ws,}$ws"
-      agent_arns+=("arn:aws:iam::${NAMAZU_ACCOUNT}:role/cosell-agent-${un}-${ws}")
-    done
-    extra+=("AgentRoleArns=$(IFS=','; echo "${agent_arns[*]}")")
-  fi
   say "session-name pin (optional):
-  when enabled, each role only accepts sessions named '<user>-session'
-  (e.g. peter-session) — one more thing enforced and visible in
+  when enabled, the role only accepts sessions named
+  '<authorized-user>-session' — one more thing enforced and visible in
   CloudTrail, but the agent deployment must use exactly that name.
   Enable only if your Namazu contact confirms their deployments set it."
   v=""
-  read -r -p "enforce per-user session names? (blank: no): " v || true
+  read -r -p "enforce session names? (blank: no): " v || true
   [[ "$v" == "y" || "$v" == "yes" ]] && extra+=("EnforceSessionName=true")
 
-  say "users after this change: $users_value"
+  say "the stack creates the role with its trust authorizing NOBODY —
+  an explicit deny for every principal. Principals (the agents'
+  runner roles) are added after, with menu option 2."
   confirm "create stack $STACK_NAME?" || { echo "aborted"; return 0; }
 
-  overrides=("Users=$users_value")
+  overrides=()
   for u in ${extra[@]+"${extra[@]}"}; do overrides+=("$u"); done
   aws cloudformation deploy \
     --template-file "$TEMPLATE" \
@@ -605,49 +713,7 @@ create_stack() {
   print_ticket_report
 }
 
-add_users() {
-  updatable_stack || return 1
-  local current users_value seen_dup=0
-  local existing=() u u2 ex_lower="" l
-  current="$(snap_users)"
-  [[ -n "$current" && "$current" != "None" ]] || current=""
-
-  read_users_input
-
-  # Duplicates against the stack (case-insensitively — IAM role names are
-  # not case-sensitive for uniqueness).
-  IFS=',' read -ra existing <<< "$current"
-  for u2 in ${existing[@]+"${existing[@]}"}; do
-    [[ -n "$u2" ]] || continue
-    ex_lower="${ex_lower:+$ex_lower,}$(lower "$u2")"
-  done
-  for u in ${NEW_USERS[@]+"${NEW_USERS[@]}"}; do
-    l="$(lower "$u")"
-    case ",$ex_lower," in
-      *",$l,"*) echo "user '$u' already exists"; seen_dup=1 ;;
-    esac
-  done
-  [[ $seen_dup -eq 1 ]] && return 1
-
-  if [[ -n "$current" ]]; then
-    users_value="$current,$(IFS=','; echo "${NEW_USERS[*]}")"
-  else
-    users_value="$(IFS=','; echo "${NEW_USERS[*]}")"
-  fi
-  say "users after this change: $users_value"
-
-  confirm "apply this change to stack $STACK_NAME?" || { echo "aborted"; return 0; }
-
-  # Plain update: preserve every existing parameter (from the snapshot),
-  # swap Users.
-  deploy_with_users "$users_value" || { echo "deploy failed"; events_hint; return 1; }
-
-  snapshot_stack # the update added outputs
-  say "done. The new user and their role are in the report below."
-  print_ticket_report
-}
-
-list_users() {
+list_state() {
   snapshot_stack
   local status users
   status="$(snap_status)"
@@ -660,25 +726,23 @@ list_users() {
   alliance="$(snap_param EnableAllianceConnections)"
   extid="$(snap_param ExternalId)"
   sesspin="$(snap_param EnforceSessionName)"
+  users="$(snap_users)"
+  if [[ -n "$users" && "$users" != "None" ]]; then
+    say "shape: per-user stack — one role per person:"
+    print_role_arns
+  else
+    say "shape: shared-role stack — one role:"
+    echo "  authorized user: $(snap_param AuthorizedUser)"
+    echo "  role ARN: $(ticket_role_arn "")"
+  fi
+  say "principals (the only thing that may assume; change: options 2/4):"
+  list_principals
   say "IAM gates in force (change: options 5-8):"
   say "  selling catalog:   ${catalog:-<unmanaged>}"
   say "  funding catalog:   ${bencatalog:-<no funding grant in this stack template>}"
   say "  outbound engagement [partner-initiated co-sell]: ${outbound:-<not a knob in this stack template>}"
   say "  alliance connections [partner-to-partner]:       ${alliance:-<not a knob in this stack template>}"
   say "  external ID: ${extid:+set}${extid:-none}   session-name pin: ${sesspin:-false}"
-  if [[ -z "$(snap_param AgentRoleArns)" ]]; then
-    say "NOTE: this is a per-user stack — its gates bind the individual roles
-  listed below (each person's own agent deployment), NOT the shared role
-  a given agent deployment assumes. Check which role your deployment's
-  consume_role_arn points at, and manage THAT stack with --stack-name."
-  fi
-  users="$(snap_users)"
-  if [[ -z "$users" || "$users" == "None" ]]; then
-    echo "no users in the stack"
-    return 0
-  fi
-  say "current users and their role ARNs:"
-  print_role_arns
 }
 
 # change_pin — show, confirm, and redeploy one stack parameter. The
@@ -734,51 +798,12 @@ change_alliance_connections() {
   change_pin EnableAllianceConnections "alliance connections [partner-to-partner]" "true false"
 }
 
-remove_user() {
-  updatable_stack || return 1
-  local users
-  users="$(snap_users)"
-  [[ -n "$users" && "$users" != "None" ]] || { echo "no users in the stack"; return 0; }
-  local existing=()
-  IFS=',' read -ra existing <<< "$users"
-  if [[ ${#existing[@]} -eq 1 ]]; then
-    say "only one user left (${existing[0]}) — removing them leaves an empty stack."
-    if confirm "delete the whole stack instead?"; then
-      if aws cloudformation delete-stack --stack-name "$STACK_NAME" \
-         && aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME"; then
-        say "stack deleted (the IAM role went with it)"
-      else
-        echo "delete failed"; events_hint; return 1
-      fi
-    else
-      echo "aborted"
-    fi
-    return 0
-  fi
-  say "current users:"
-  local i=1 u n=""
-  for u in ${existing[@]+"${existing[@]}"}; do echo "  $i) $u"; i=$((i+1)); done
-  read -r -p "remove which (number): " n || true
-  [[ "$n" =~ ^[0-9]+$ && "$n" -ge 1 && "$n" -le ${#existing[@]} ]] || die "invalid selection"
-  local victim="${existing[$((n-1))]}"
-  local kept=()
-  for u in ${existing[@]+"${existing[@]}"}; do [[ "$u" != "$victim" ]] && kept+=("$u"); done
-  say "removing '$victim'; users after this change: $(IFS=','; echo "${kept[*]}")"
-  confirm "apply?" || { echo "aborted"; return 0; }
-  deploy_with_users "$(IFS=','; echo "${kept[*]}")" \
-    || { echo "deploy failed"; events_hint; return 1; }
-  snapshot_stack # the update removed outputs
-  say "done. '$victim' and their role are gone; remaining users:"
-  print_role_arns
-  say "tell Namazu to drop the contract entry for '$victim' — the role it names is deleted."
-}
-
 delete_stack() {
   stack_exists || { echo "no stack $STACK_NAME — nothing to delete"; return 0; }
-  confirm "delete stack $STACK_NAME and every user role in it?" || { echo "aborted"; return 0; }
+  confirm "delete stack $STACK_NAME (the role goes with it)?" || { echo "aborted"; return 0; }
   if aws cloudformation delete-stack --stack-name "$STACK_NAME" \
      && aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME"; then
-    say "stack deleted (all per-user IAM roles went with it)"
+    say "stack deleted — the role and its trust are gone; all access stops immediately"
   else
     echo "delete failed"; events_hint; return 1
   fi
@@ -788,65 +813,60 @@ delete_stack() {
 show_help() {
   cat <<'EOF'
 
-how this tool works, task by task
+how this tool works, task by step
 =================================
 
 THE MODEL
-  One CloudFormation stack holds every user. Its `Users` parameter IS
-  the list of people with access; each name gets its own IAM role
-  (Namazu-CoSell-Opportunity-Manager-<name>) that only the Namazu
-  hosting account may assume, and only when the session carries that
-  person's name as the sts:SourceIdentity. Roles are separate, so
-  access is per-person visible in CloudTrail and revocable
-  independently.
+  One CloudFormation stack, one IAM role. Access is exactly one thing:
+  the principal list. Create (option 1) makes the role with its trust
+  authorizing NOBODY — an explicit deny for every principal. Add a
+  principal (option 2) and the Namazu agent's runner role for that
+  workspace may assume — still only with the right SourceIdentity and
+  external ID. Remove one (option 4) and it cannot, immediately.
+  Delete the stack (option 0) and the role goes with it. There is no
+  account-root trust anywhere: the empty state is fail-closed by
+  construction.
 
-1) CREATE THE ACCESS STACK (first-time setup)
+1) CREATE THE ACCESS STACK
    step 1  make sure you are authenticated to the AWS account linked
            to your Partner Central account (shown in the header).
-   step 2  enter one or more user names (see FIELD REFERENCE below).
-   step 3  set the external ID, the catalog pin, the Namazu Cloud
-           workspace(s) (see FIELD REFERENCE — the script constructs
-           the runner ARNs from them), and optionally the
-           session-name pin. These are only asked here; later edits
-           preserve them.
-   step 4  confirm — the script deploys the stack and prints a TICKET
-           REPORT: everything to hand to your Namazu contact (the
-           external ID, the trusted principals, every role ARN, and the
-           contract entries they paste on their side).
+   step 2  the authorized user — the person the role is attributed to;
+           the sts:SourceIdentity every agent session must present and
+           what CloudTrail shows (a personal username, not a group).
+   step 3  the external ID (required; generated by default or enter
+           your own) and the catalog pin; optionally the session-name
+           pin. Asked only here; later edits preserve them.
+   step 4  confirm — the stack deploys the role with its trust
+           authorizing nobody, and prints a TICKET REPORT: everything
+           to hand to your Namazu contact.
 
-2) ADD A USER
-   step 1  enter the name(s). Duplicates — already on the stack or
-           repeated in your input, even differing only in case — are
-           rejected.
-   step 2  confirm. The stack is UPDATED with the extended Users
-           list; every other parameter is re-passed unchanged, so an
-           external ID / catalog pin chosen at creation survives.
-   step 3  the script reprints the ticket report — the new user, their
-           role ARN, and the contract entry to hand to Namazu are in it.
+2) ADD PRINCIPALS
+   step 1  give <user_name>=<workspace-id> pairs, comma-separated
+           (see FIELD REFERENCE). The script constructs each runner
+           ARN — you never paste an ARN — and shows the full list
+           after the change.
+   step 2  confirm. The stack is UPDATED; every other parameter is
+           re-passed unchanged. The principal can assume immediately
+           (with the SourceIdentity + external ID).
 
-3) LIST USERS AND THE IAM GATES IN FORCE
-   Shows the stack status, both catalog pins (selling and funding),
-   the motion toggles (outbound engagement, alliance connections),
-   the external ID / session-pin state, every user, and their role
-   ARN. Read-only. Anything the stack's template doesn't manage is
-   labeled as such.
+3) LIST THE STATE
+   The stack status, the shape (shared role or per-user roles), the
+   role ARN(s), the principal list (or the nobody-authorized state),
+   the catalog pins, the motion toggles, and the external ID /
+   session-pin state. Read-only.
 
-4) REMOVE A USER
-   step 1  pick the user by number from the current list.
-   step 2  confirm. The stack is updated with the shortened Users
-           list and that user's IAM role is deleted with it. The
-           person loses access immediately.
-   note    when one user remains, removing them would leave an empty
-           Users list — the template forbids that, so the script
-           offers to delete the whole stack instead.
+4) REMOVE A PRINCIPAL
+   step 1  pick the principal by number.
+   step 2  confirm. The trust drops it; the principal cannot assume
+           immediately. Removing the last one returns the role to the
+           explicit deny — the role itself stays, ready to authorize
+           the next principal.
 
 5) CHANGE THE SELLING CATALOG
    partnercentral-selling — opportunities, invitations, solutions.
-   Enforced by IAM on every role in the stack ('Sandbox' for sandbox
-   'AWS' production / 'Both'; there is no unpinned option: an
-   operator always chooses). Every other parameter is preserved;
-   update the agent-side catalog hint to match (the IAM condition
-   decides either way).
+   Enforced by IAM on the role ('Sandbox' for AWS's isolated test
+   catalog, 'AWS' production, 'Both'; there is no unpinned option).
+   Every other parameter is preserved.
 
 6) CHANGE THE FUNDING CATALOG
    partnercentral-benefits — funding applications, a real-money ask,
@@ -870,55 +890,57 @@ THE MODEL
    off: default. Enforced by IAM the same way.
 
 9) PRINT THE TICKET REPORT
-   Everything to send Namazu, copy-paste ready: the account/region/
-   stack, the Namazu Cloud workspace(s) the ticket wires (decoded from
-   the runner principal names — or a fill-in blank when the trust is
-   account-root), the external ID, the trusted runner principals (with
-   the user_name + workspace each serves), every role ARN with the
-   SourceIdentity it requires, the contract entries rendered verbatim
-   in the agent_apn shape (consume_role_arn, user_name,
-   source_identity, external_id, catalog), and the capability gates in
-   force. Read-only — run it anytime: after a gate flip (5-8), the
-   gates in the report are the live ones; after adding or removing a
-   user, the entries are the current set.
+   Everything to send Namazu, copy-paste ready: account/region/stack,
+   the Namazu Cloud workspace(s) the ticket wires, the external ID,
+   the trusted principals (or the nobody-authorized state), the role
+   ARN with the SourceIdentity it requires, the contract entries
+   verbatim in the agent_apn shape (consume_role_arn, user_name,
+   source_identity, external_id, catalog), and the capability gates
+   in force. Read-only — run it anytime; it always reflects the live
+   stack.
 
 0) DELETE THE ACCESS STACK
-   Deletes the stack and EVERY user role in it; all Namazu agent
-   access stops immediately. Reversible only by recreating (option 1)
-   and re-sharing the fresh role ARNs.
+   Deletes the stack AND the role — there is no retain; all access
+   stops immediately. Reversible only by recreating (option 1) with a
+   fresh external ID and re-adding principals.
 
 FIELD REFERENCE
-  user name     2-30 characters, letters/digits/_+=,.@-; becomes part
-                of the IAM role name, the role's AuthorizedUser tag,
-                and the sts:SourceIdentity the agent must present.
-  workspace     <user_name>=<workspace-id> pairs, comma-separated —
-                the Namazu Cloud workspaces you created where the
-                agent will run. The user_name is YOUR choice, anything
-                IAM-compliant up to 20 characters (letters/digits/
-                _+=,.@-); we recommend it match your own company
-                username convention. The workspace id is the 24-hex id
-                shown for your instance in Namazu Cloud. The script
-                constructs each runner ARN from the pair:
-                arn:aws:iam::308044622771:role/
-                cosell-agent-<user_name>-<workspace-id> — and pins the
-                trust to exactly those. No defaults: you state every
-                pair. Blank keeps account-root trust.
-  external ID   REQUIRED shared secret for assume-role (2+ chars,
-                same charset) — confused-deputy protection. The create
-                flow generates a random one by default or takes yours;
-                share it with your Namazu contact, who wires it into
-                the deployment contract (both sides must match, or
-                every assume is denied).
-  catalogs      'Sandbox', 'AWS', or 'Both' for each of selling and
-                funding (see options 5 and 6); enforced by IAM.
-  motions       'true'/'false' toggles for outbound engagement
-                (option 7) and alliance connections (option 8).
-  session pin   forces sessions to be named '<user>-session'; set
-                at create time. Enable only if the Namazu side
-                configures session names.
+  authorized   2-64 characters, letters/digits/_+=,.@-; the person the
+  user         role is attributed to — the role's AuthorizedUser tag
+               and the sts:SourceIdentity the agent must present.
+               Asked once, at create.
+  principal    <user_name>=<workspace-id> — the pair that names one
+  pair         runner role: arn:aws:iam::308044622771:role/
+               cosell-agent-<user_name>-<workspace-id>. The user_name
+               is YOUR choice, anything IAM-compliant up to 20
+               characters (letters/digits/_+=,.@-); we recommend it
+               match your own company username convention. The
+               workspace id is the 24-hex id shown for your instance
+               in Namazu Cloud. Options 2/4 add and remove them; the
+               trust allows exactly the constructed ARNs, nothing
+               else.
+  external ID  REQUIRED shared secret for assume-role (2+ chars,
+               same charset) — confused-deputy protection. The create
+               flow generates a random one by default or takes yours;
+               share it with your Namazu contact, who wires it into
+               the deployment contract (both sides must match, or
+               every assume is denied).
+  catalogs     'Sandbox', 'AWS', or 'Both' for each of selling and
+               funding (see options 5 and 6); enforced by IAM.
+  motions      'true'/'false' toggles for outbound engagement
+               (option 7) and alliance connections (option 8).
+  session pin  forces sessions to be named
+               '<authorized-user>-session'; set at create time.
+               Enable only if the Namazu side configures session
+               names.
 
 CLI FLAGS
-  --stack-name  manage a different stack (default namazu-cosell-manager)
+  --stack-name  manage a different stack (default namazu-cosell-manager).
+                 An existing per-user stack (one role per person,
+                 deployed directly from templates/per-user-roles.yaml —
+                 see README) can be passed here: the script detects the
+                 shape from the stack itself, and options 2-9 manage it
+                 the same way.
   --region      region for the AWS calls (default: your CLI config)
 EOF
 }
@@ -1166,10 +1188,10 @@ while true; do
   echo "${C_B}Namazu co-selling agent — access manager${C_0}"
   render_dashboard
   echo
-  echo "  1) Create the access stack (first-time setup)."
-  echo "  2) Add a user."
-  echo "  3) List users, role ARNs, and the IAM gates in force."
-  echo "  4) Remove a user."
+  echo "  1) Create the access stack (the role exists; nobody authorized yet)."
+  echo "  2) Add principals (trust the agents' runner roles)."
+  echo "  3) List the role, principals, and the IAM gates in force."
+  echo "  4) Remove a principal."
   echo "  5) Change the selling catalog (Sandbox / AWS / Both)."
   echo "  6) Change the funding catalog (Sandbox / AWS / Both)."
   echo "  7) Toggle outbound engagement (partner-initiated co-sell)."
@@ -1181,9 +1203,9 @@ while true; do
   read -r -p "> " choice || { echo; exit 0; }
   case "$choice" in
     1) create_stack ;;
-    2) add_users ;;
-    3) list_users ;;
-    4) remove_user ;;
+    2) add_principals ;;
+    3) list_state ;;
+    4) remove_principals ;;
     5) change_selling_catalog ;;
     6) change_funding_catalog ;;
     7) change_outbound_engagement ;;
