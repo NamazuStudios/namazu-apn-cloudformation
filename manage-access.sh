@@ -13,9 +13,9 @@
 # sts:SourceIdentity their sessions present — and their workspace id in
 # Namazu Cloud. One Allow statement per user, composed by this script
 # into the role's trust. Removing a user (option 4) drops theirs.
-# Deleting the stack destroys the role. Gate flips (options 5-8) and
-# the on-demand ticket report (option 9) round it out; after every add
-# the report is the exact configuration Namazu needs.
+# Deleting the stack destroys the role. Gate flips (options 5-8)
+# round it out; after every add the report is the exact configuration
+# Namazu needs.
 #
 # Requirements: bash + the AWS CLI, authenticated as a principal allowed
 # to create IAM roles in the AWS account linked to your Partner Central
@@ -103,8 +103,7 @@ nobody), add/remove users (two questions per user — their identifier
 to be provisioned by Namazu Studios AND the SourceIdentity they
 present) and their workspace id — one trust statement each), flip
 the capability gates, print the ticket report to send Namazu, or
-delete the stack (the role goes with it). `ticket` reprints the full
-report on demand; in the menu, 'h' shows a detailed help.
+delete the stack (the role goes with it). In the menu, 'h' shows a detailed help.
 
 Requires: bash, the AWS CLI, and credentials for the AWS account linked
 to your Partner Central account. Deploys
@@ -230,8 +229,8 @@ events_hint() {
 # and the contract entries rendered in the exact shape the Namazu
 # deployment contract (the agent_apn block) carries. Read-only — built
 # entirely from the snapshot, so it always reflects the live stack.
-# Printed after create and add-user, and on demand (menu option 9 /
-# `ticket`), so the ticket a customer sends is never assembled by hand.
+# Printed after create and after every add, so the ticket a customer
+# sends is never assembled by hand.
 
 # The stack's single RoleArn output.
 ticket_role_arn() {
@@ -453,12 +452,22 @@ add_user() {
   local id ws v e
   say "adding a user — two questions, one at a time. (The README carries a
   screenshot — namazu-cloud-workspace.png — showing where both values
-  appear in Namazu Cloud.)"
+  appear in Namazu Cloud.)
+
+  About the identifier: it must match the runner role Namazu Studios
+  provisions for that workspace — cosell-agent-<identifier>-<workspace>.
+  If the workspace already has a deployment, use the identifier already
+  provisioned (your Namazu contact confirms it). For a new workspace,
+  pick your org-internal notation — we recommend first initial + last
+  name, e.g. jsmith — and share it with Namazu via the report; they
+  provision it verbatim. IAM rejects unknown principals, so a mismatch
+  fails the whole update — each user is deployed separately below so a
+  bad one cannot sink the rest."
   while true; do
     # 1) identifier — the org-internal notation; double duty.
     id=""
     while true; do
-      read -r -p "  identifier — the user's org-internal notation, e.g. first initial + last name like jsmith (blank: stop): " id || true
+      read -r -p "  identifier — the label in the runner role name Namazu Studios provisions for this workspace (blank: stop): " id || break 2
       [[ -z "$id" ]] && break 2
       [[ "$id" =~ $UNAME_RE ]] && break
       echo "    invalid: 2-20 characters, letters/digits/_+=,.@- only"
@@ -466,7 +475,7 @@ add_user() {
     # 2) workspace id — the Namazu Cloud workspace.
     ws=""
     while true; do
-      read -r -p "  workspace id — the 24-hex id of their workspace in Namazu Cloud (e.g. 6aea0e8a904eac104fa708f1): " ws || true
+      read -r -p "  workspace id — the 24-hex id of their workspace in Namazu Cloud (e.g. 0a1b2c3d4e5f6a7b8c9d0e1f): " ws || break 2
       if [[ ! "$ws" =~ $WS_RE ]]; then
         echo "    invalid: exactly 24 hex characters — the id shown for their workspace in Namazu Cloud"
         continue
@@ -488,30 +497,46 @@ add_user() {
       and it is the sts:SourceIdentity their agent sessions must
       present — the id both sides attribute their actions to."
     new_entries+=("$id|$ws")
-    read -r -p "  add another user? (y/N): " v || true
+    read -r -p "  add another user? (y/N): " v || break
     [[ "$v" == "y" || "$v" == "Y" ]] || break
   done
   [[ ${#new_entries[@]} -gt 0 ]] || { echo "aborted"; return 0; }
 
-  local -a all_entries=()
-  while IFS= read -r e; do all_entries+=("$e"); done < <(current_users)
-  for e in ${new_entries[@]+"${new_entries[@]}"}; do all_entries+=("$e"); done
-  local joined
-  joined="$(printf '%s\n' ${all_entries[@]+"${all_entries[@]}"} | paste -sd, -)"
-  say "users after this change:"
+  # Deploy ONE USER AT A TIME: each user is an independent Allow
+  # statement, and IAM rejects trust principals that do not exist — a
+  # bad identifier would otherwise roll back the whole batch (observed
+  # live: one unknown principal sank every user in the update).
+  # Deploying separately means the users before a failure stay applied,
+  # and the culprit is named.
+  local -a applied=()
+  while IFS= read -r e; do applied+=("$e"); done < <(current_users)
+  for e in ${new_entries[@]+"${new_entries[@]}"}; do
+    applied+=("$e")
+    local j
+    j="$(printf '%s\n' ${applied[@]+"${applied[@]}"} | paste -sd, -)"
+    if deploy_with_overrides "Users=$j" \
+       && snapshot_stack \
+       && [[ "$(snap_status)" == *_COMPLETE ]] \
+       && [[ "$(snap_status)" != *ROLLBACK* ]]; then
+      echo "  applied: $e"
+    else
+      say "FAILED on this user: $e
+  The update rolled back to the users applied before it; the stack is
+  stable. Almost always the cause is the identifier: the runner role
+  Namazu Studios provisioned for that workspace has a different one
+  (IAM rejects unknown principals). Confirm the provisioned identifier
+  with your Namazu contact, then re-add this user."
+      events_hint
+      return 1
+    fi
+  done
+  say "done. users now on the stack:"
   local u
-  for u in ${all_entries[@]+"${all_entries[@]}"}; do render_user "$u"; done
-  confirm "apply to $STACK_NAME?" || { echo "aborted"; return 0; }
-  if deploy_with_overrides "Users=$joined" \
-     && snapshot_stack \
-     && [[ "$(snap_status)" == *_COMPLETE ]]; then
-    say "done. each user's runner may now assume — presenting their
-  identifier as the source identity plus the external ID. The report
-  below is the exact configuration Namazu needs."
-    print_ticket_report
-  else
-    echo "deploy failed"; events_hint; return 1
-  fi
+  for u in ${applied[@]+"${applied[@]}"}; do render_user "$u"; done
+  say "each user's runner may now assume — presenting their identifier as
+  the source identity plus the external ID. The report below is the
+  exact configuration Namazu needs."
+  print_ticket_report
 }
 
 # The remove operation: just removes. Pick a user, drop the entry,
@@ -559,7 +584,8 @@ remove_user() {
   joined="$(printf '%s\n' ${kept[@]+"${kept[@]}"} | paste -sd, -)"
   if deploy_with_overrides "Users=$joined" \
      && snapshot_stack \
-     && [[ "$(snap_status)" == *_COMPLETE ]]; then
+     && [[ "$(snap_status)" == *_COMPLETE ]] \
+     && [[ "$(snap_status)" != *ROLLBACK* ]]; then
     say "done. their runner can no longer assume — IAM takes effect
   immediately. Tell Namazu to drop the contract entry that names them."
   else
@@ -652,7 +678,7 @@ list_state() {
   say "  funding catalog:   ${bencatalog:-<no funding grant in this stack template>}"
   say "  outbound engagement [partner-initiated co-sell]: ${outbound:-<not a knob in this stack template>}"
   say "  alliance connections [partner-to-partner]:       ${alliance:-<not a knob in this stack template>}"
-  say "  external ID: ${extid:+set}${extid:-none}   session-name pin: ${sesspin:-false}"
+  say "  external ID: ${extid:-none}   session-name pin: ${sesspin:-false}"
 }
 
 # change_pin — show, confirm, and redeploy one stack parameter. The
@@ -685,7 +711,7 @@ change_pin() {
     newval="$(snap_param "$key")"
     say "done. $label is now: $newval"
     say "IAM re-evaluates per request; a live agent session picks this up at its next credential refresh, about 1h. Update the agent-side hint to match. IAM decides either way."
-    say "the gates changed — reprint the ticket report (option 9) before contacting Namazu: its capability gates reflect the new state."
+    say "the gates changed — tell Namazu: any report they hold shows the old gates."
   else
     echo "deploy failed"; events_hint; return 1
   fi
@@ -726,6 +752,14 @@ how this tool works, task by step
 =================================
 
 THE MODEL
+  Onboarding order (each step has an owner): you create the
+  namespaces for your users in Namazu Cloud -> Namazu Studios adds the
+  co-selling agent to them (provisioning each workspace's runner role,
+  cosell-agent-<identifier>-<workspace> — the runner must exist before
+  its user can be added: IAM rejects unknown principals) -> you enable
+  the principals in YOUR account with this script -> the ticket report
+  goes to Namazu, who wires the deployment.
+
   One CloudFormation stack, one IAM role. Access is exactly one thing:
   the principal list. Create (option 1) makes the role with its trust
   authorizing NOBODY — an explicit deny for every principal. Add a
@@ -748,19 +782,22 @@ THE MODEL
            and the role ARN to your Namazu contact when ready.
 
 2) ADD A USER (two questions, one at a time)
-   step 1  the identifier — the user's ORG-INTERNAL NOTATION for this
-           user: we recommend first initial + last name (e.g. jsmith).
-           It does double duty: it is baked into the runner role name
-           to be provisioned by Namazu Studios
-           (cosell-agent-<identifier>-<workspace> — that runner becomes
-           the ONLY principal for the user) AND it is the
-           sts:SourceIdentity their agent sessions must present — the
-           id both sides attribute that user's actions to. 2-20
-           characters, letters/digits/_+=,.@- only. You never paste an
-           ARN.
+   step 1  the identifier — the label in the runner role name Namazu
+           Studios provisions for that workspace:
+           cosell-agent-<identifier>-<workspace> (the user's ONLY
+           principal) and the sts:SourceIdentity their sessions
+           present — the id both sides attribute that user's actions
+           to. 2-20 characters, letters/digits/_+=,.@- only; you never
+           paste an ARN. THE RULE: if the workspace already has a
+           deployment, use the identifier already provisioned (your
+           Namazu contact confirms it) — IAM rejects unknown
+           principals, so a guess that does not match fails the update.
+           For a new workspace, pick your org-internal notation (first
+           initial + last name, e.g. jsmith) and share it with Namazu
+           via the report; they provision it verbatim.
    step 2  the workspace id — exactly 24 hex characters: the id of
            their workspace in Namazu Cloud (e.g.
-           6aea0e8a904eac104fa708f1). One user per workspace.
+           0a1b2c3d4e5f6a7b8c9d0e1f). One user per workspace.
            After each user the script shows their entry + the runner
            ARN, and offers to add another; blank at the identifier
            stops.
@@ -810,15 +847,6 @@ THE MODEL
         + connection invitations (alliance-led co-sell), partner
         reads, alliance-lead contact.
    off: default. Enforced by IAM the same way.
-
-9) PRINT THE TICKET REPORT
-   Everything to send Namazu, copy-paste ready: account/region/stack,
-   the users (workspace, identifier, source identity — or the
-   nobody-authorized state), the external ID, the trusted principals
-   they translate to, the role ARN, the contract entries verbatim in
-   the agent_apn shape (consume_role_arn, user_name, source_identity,
-   external_id, catalog), and the capability gates in force.
-   Read-only — run it anytime; it always reflects the live stack.
 
 0) DELETE THE ACCESS STACK
    Deletes the stack AND the role — there is no retain; all access
@@ -960,7 +988,7 @@ render_card_from() { # $1 = state file, $2 = stack name
   echo "│  status: $status    drift: $(drift_dot "$drift")"
   echo "│  selling  $(gate_dot selling "$selling")   funding  $(gate_dot funding "$funding")"
   echo "│  outbound $(gate_dot outbound "$outbound")   alliance $(gate_dot alliance "$alliance")"
-  echo "│  external-id: ${extid:+set}${extid:-none}    session-pin: ${sesspin:-false}"
+  echo "│  external-id: ${extid:-none}    session-pin: ${sesspin:-false}"
   if [[ -n "$users" && "$users" != "None" ]]; then
     echo "│  users:"; echo "$users" | tr ',' '\n' | sed 's/^/│    /'
   else
@@ -1083,11 +1111,10 @@ case "$COMMAND" in
   status)     cmd_status; exit 0 ;;
   drift)      cmd_drift; exit 0 ;;
   set)        cmd_set "$@"; exit $? ;;
-  ticket)     print_ticket_report; exit 0 ;;
   delete)     delete_stack; exit 0 ;;
   help)       show_help; exit 0 ;;
   menu)       : ;;
-  *)          die "unknown command: $COMMAND (commands: status set drift ticket delete menu help; or run with no command for the menu)" ;;
+  *)          die "unknown command: $COMMAND (commands: status set drift delete menu help; or run with no command for the menu)" ;;
 esac
 
 interactive_menu() {
@@ -1105,7 +1132,6 @@ while true; do
   echo "  6) Change the funding catalog (Sandbox / AWS / Both)."
   echo "  7) Toggle outbound engagement (partner-initiated co-sell)."
   echo "  8) Toggle alliance connections (partner-to-partner)."
-  echo "  9) Print the ticket report (everything to send Namazu)."
   echo "  0) Delete the access stack entirely."
   echo "  h) Help — what each option does, step by step."
   echo "  q) Quit."
@@ -1119,11 +1145,10 @@ while true; do
     6) change_funding_catalog ;;
     7) change_outbound_engagement ;;
     8) change_alliance_connections ;;
-    9) print_ticket_report ;;
     0) delete_stack ;;
     h|H) show_help ;;
     q|Q) exit 0 ;;
-    *) echo "Invalid choice — please enter 1–9, 0, h, or q." ;;
+    *) echo "Invalid choice — please enter 1–8, 0, h, or q." ;;
   esac
 done
 }

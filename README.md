@@ -43,29 +43,53 @@ no permissions that could reach it.
 The sections above describe the trust model inside one account. The same
 templates also let the Namazu co-selling agent (running in Namazu's hosting
 account, 308044622771) assume roles in YOUR account — cross-account, with
-no credentials ever shared:
+no credentials ever shared.
 
-1. You created your workspace(s) in Namazu Cloud — you know their ids.
-   Each workspace's agent runs under a dedicated runner role to be
-   provisioned by Namazu Studios, named deterministically
-   `arn:aws:iam::308044622771:role/cosell-agent-<identifier>-<workspace-id>`
-   — so the interactive manager CONSTRUCTS the principal from what you
-   enter; you never paste an ARN.
-2. You create the stack in YOUR account (option 1, one shot): the role
-   exists immediately with its trust an explicit deny — nobody may
-   assume. Adding a user (option 2) asks two questions, one at a time:
-   the **identifier** — the user's org-internal notation (recommended:
-   first initial + last name, e.g. `jsmith`), which does double duty
-   (baked into the runner role name to be provisioned by Namazu
-   Studios, `cosell-agent-<identifier>-<workspace>` — their only
-   principal — AND their `sts:SourceIdentity`, the id both sides
-   attribute their actions to) — and the **workspace id** (exactly 24
-   hex characters, their workspace in Namazu Cloud). The script
-   composes one Allow statement per user into the role's trust.
-   Removing a user (option 4) drops their statement instantly.
-3. You send the ticket report the script prints after adding: the exact
-   configuration Namazu needs — the external ID, the role ARN, and one
-   agent_apn entry per user (workspace, identifier, source identity).
+**Onboarding happens in this order — each step has an owner:**
+
+1. **You create the namespaces for your users** *(prerequisite)*. In
+   Namazu Cloud, create a workspace for each user who will operate the
+   co-selling agent. From this point you know their workspace ids (the
+   screenshot below shows where the ids and user names appear).
+
+2. **Namazu Studios adds the co-selling agent** to those workspaces.
+   This provisions, in Namazu's account, each workspace's dedicated
+   runner role —
+   `arn:aws:iam::308044622771:role/cosell-agent-<identifier>-<workspace>`
+   — using the identifiers you agree with your Namazu contact (your
+   org-internal notation, e.g. `jsmith`; share the list in this step).
+
+   > **Ordering note:** this step must come before step 3. IAM rejects
+   > trust principals that do not exist, so adding a user whose runner
+   > is not provisioned yet fails that user's update (the script
+   > deploys each user separately and names the culprit, so a mismatch
+   > never sinks the rest — but the runner must exist for the user to
+   > be added at all).
+
+3. **You enable the principals in your account.** Run
+   `./manage-access.sh`:
+   - **option 1** — the one-shot create: the well-known
+     `Namazu-CoSell-Opportunity-Manager` role exists immediately, its
+     trust an explicit deny (nobody may assume); a random external ID
+     is generated (or supply `--external-id` up front).
+   - **option 2** — add each user, two questions at a time: the
+     **identifier** (the label in the runner role name Namazu Studios
+     provisioned for that workspace — it is also the
+     `sts:SourceIdentity` their sessions present, the id both sides
+     attribute their actions to; for an existing deployment use the
+     provisioned identifier, your Namazu contact confirms it) and the
+     **workspace id** (exactly 24 hex characters). The script
+     constructs the principal from the pair — you never paste an ARN —
+     and composes one Allow statement per user into the role's trust.
+   - **option 4** removes a user (their statement drops instantly);
+     **options 5-8** flip the capability gates.
+
+4. **You send the ticket report** the script prints after adding: the
+   exact configuration Namazu needs — the external ID, the role ARN,
+   and one `agent_apn` entry per user (workspace, identifier, source
+   identity). Namazu wires the deployment to the role; from then on
+   the agents can assume — and every action lands in your CloudTrail
+   attributed to that user.
 
 ### Where to find the workspace id and the user name
 
@@ -75,14 +99,21 @@ your workspace's page in Namazu Cloud:
 ![Where to find the workspace id and the user name in Namazu Cloud](namazu-cloud-workspace.png)
 
 - **workspace id** — the 24-hex identifier shown for your workspace
-  (e.g. `6aea0e8a904eac104fa708f1`). It is exactly what the add-user
+  (e.g. `0a1b2c3d4e5f6a7b8c9d0e1f`). It is exactly what the add-user
   prompt expects: 24 characters, letters `a-f` and digits only.
-- **user name** — the name Namazu Cloud shows for the user. Use it as
-  the basis for the **identifier** you enter (your org-internal
-  notation — first initial + last name, e.g. `jsmith`): it becomes part
-  of the runner role name to be provisioned by Namazu Studios and the
-  `sts:SourceIdentity` their sessions present, so pick the form you
-  want actions attributed to in CloudTrail.
+- **user name** — the name Namazu Cloud shows for the user. It is the
+  basis for the **identifier** you enter — but note the rule: the
+  identifier must match the runner role Namazu Studios provisions for
+  that workspace (`cosell-agent-<identifier>-<workspace>`). If the
+  workspace already has a deployment, use the identifier already
+  provisioned (your Namazu contact confirms it); for a new workspace,
+  pick your org-internal notation — first initial + last name, e.g.
+  `jsmith` — and share it with Namazu via the ticket report; they
+  provision it verbatim. It is also the `sts:SourceIdentity` their
+  sessions present, so it is how actions are attributed in CloudTrail.
+  IAM rejects unknown principals: a mismatched identifier fails the
+  update (the script deploys each user separately so one bad entry
+  cannot sink the rest).
 
 From then on, every action the agent takes in your account is that
 assumed role in your CloudTrail, attributed to the named person, scoped
