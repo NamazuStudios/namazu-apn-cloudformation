@@ -365,6 +365,12 @@ updatable_stack() {
       echo "stack $STACK_NAME is mid-operation ($status) — wait for it to finish, then retry"
       return 1 ;;
   esac
+  if [[ "$status" == *ROLLBACK* ]]; then
+    say "note: the stack is $status — the last update FAILED and rolled
+  back. Anything added in that update is NOT on the stack (this is
+  why users from a failed add do not show up); the stack itself is
+  stable and updatable, so re-adding works."
+  fi
 }
 
 # ---- user entries -------------------------------------------------------------
@@ -521,11 +527,13 @@ add_user() {
       echo "  applied: $e"
     else
       say "FAILED on this user: $e
-  The update rolled back to the users applied before it; the stack is
-  stable. Almost always the cause is the identifier: the runner role
-  Namazu Studios provisioned for that workspace has a different one
-  (IAM rejects unknown principals). Confirm the provisioned identifier
+  Almost always the cause is the identifier: the runner role Namazu
+  Studios provisioned for that workspace has a different one (IAM
+  rejects unknown principals). Confirm the provisioned identifier
   with your Namazu contact, then re-add this user."
+      snapshot_stack # post-rollback truth, not the pre-fail snapshot
+      say "users actually on the stack right now:"
+      list_users_entries
       events_hint
       return 1
     fi
@@ -662,6 +670,11 @@ list_state() {
   status="$(snap_status)"
   [[ -n "$status" ]] || { echo "no stack $STACK_NAME yet — nothing to list (option 1 creates it)"; return 0; }
   echo "stack: $STACK_NAME ($status)"
+  if [[ "$status" == *ROLLBACK* || "$status" == *FAILED* ]]; then
+    say "⚠ the last update FAILED and rolled back — users added in that
+  update are NOT on the stack (this is why they do not show below);
+  the stack is stable and updatable, so re-adding them works."
+  fi
   local catalog bencatalog outbound alliance extid sesspin
   catalog="$(snap_param CatalogPin)"
   bencatalog="$(snap_param BenefitsCatalogPin)"
@@ -986,6 +999,10 @@ render_card_from() { # $1 = state file, $2 = stack name
   users="$(param_of "$fetched" Users)"
   echo "┌─ $stack — the agent deployment's gates [consume_role_arn] ──"
   echo "│  status: $status    drift: $(drift_dot "$drift")"
+  if [[ "$status" == *ROLLBACK* || "$status" == *FAILED* ]]; then
+    echo "│  ${C_R}⚠ the last update FAILED and rolled back — users added in it are${C_0}"
+    echo "│  ${C_R}NOT applied; the stack is stable and updatable (re-add them).${C_0}"
+  fi
   echo "│  selling  $(gate_dot selling "$selling")   funding  $(gate_dot funding "$funding")"
   echo "│  outbound $(gate_dot outbound "$outbound")   alliance $(gate_dot alliance "$alliance")"
   echo "│  external-id: ${extid:-none}    session-pin: ${sesspin:-false}"
