@@ -911,15 +911,10 @@ param_of() { # $1 = fetched lines, $2 = key
   awk -v pre="P:" -v k="$2" 'index($0, pre k "=") == 1 { sub("^" pre k "=", ""); print; exit }' <<< "$1"
 }
 
-render_card() { # $1 = stack name
-  local stack="$1" fetched
-  fetched="$(fetch_stack_state "$stack")"
-  if [[ "$fetched" == "MISSING" || -z "$fetched" ]]; then
-    echo "┌─ $stack ──────────────────────────────────────────────"
-    echo "│  ${C_D}not created yet${C_0}"
-    echo "└───────────────────────────────────────────────────────"
-    return 0
-  fi
+render_card_from() { # $1 = state file, $2 = stack name
+  local stack="$2" fetched
+  fetched="$(cat "$1")"
+  if [[ -z "$fetched" ]]; then return 1; fi
   local status drift selling funding outbound alliance extid sesspin users agents auser title warn
   status="$(field_of "$fetched" "S:")"
   drift="$(field_of "$fetched" "D:")"
@@ -952,13 +947,28 @@ render_card() { # $1 = stack name
 }
 
 render_dashboard() {
+  # Cards render only for stacks that EXIST — a deleted or not-created
+  # stack (e.g. the per-user customer stack in an account where it isn't
+  # used) gets a one-line hint, never a card box that reads like a live
+  # gate panel.
+  local -a stacks=("$STACK_NAME")
   local other="namazu-cosell-manager"
   [[ "$STACK_NAME" == "namazu-cosell-manager" ]] && other="namazu-cosell-access"
-  local ta="/tmp/opencode/mas-card-a.$$.tmp" tb="/tmp/opencode/mas-card-b.$$.tmp"
-  render_card "$STACK_NAME" > "$ta" &
-  render_card "$other" > "$tb" &
+  stacks+=("$other")
+  local s ta="/tmp/opencode/mas-state-a.$$.tmp" tb="/tmp/opencode/mas-state-b.$$.tmp"
+  fetch_stack_state "${stacks[0]}" > "$ta" 2>&1 &
+  fetch_stack_state "${stacks[1]}" > "$tb" 2>&1 &
   wait
-  cat "$ta" "$tb"
+  local i=0
+  for s in ${stacks[@]+"${stacks[@]}"}; do
+    local f; f="$ta"; [[ $i -eq 1 ]] && f="$tb"
+    if head -1 "$f" 2>/dev/null | grep -q "^MISSING$"; then
+      echo "${C_D}· $s: not created${C_0}"
+    else
+      render_card_from "$f" "$s"
+    fi
+    i=$((i + 1))
+  done
   rm -f "$ta" "$tb"
 }
 
